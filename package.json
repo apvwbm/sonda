@@ -1,6 +1,6 @@
 {
   "name": "sonda",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Self-hosted store and API for personal data, built around idempotent ingest",
   "type": "module",
