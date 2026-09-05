@@ -6,19 +6,19 @@ import type { Config } from '../config.ts';
 import { authenticateBearer } from './token.ts';
 
 /**
- * Sesión de la interfaz: cookie firmada, sin tabla de sesiones.
+ * Interface session: a signed cookie, with no sessions table.
  *
- * La cookie lleva su propia caducidad dentro de la firma, así que un cliente no
- * puede alargarla ignorando el Max-Age. A cambio no hay revocación en servidor:
- * logout borra la cookie del navegador, y para invalidar todas las sesiones de
- * golpe hay que cambiar SONDA_SESSION_SECRET.
+ * The cookie carries its own expiry inside the signature, so a client cannot
+ * extend it by ignoring Max-Age. The trade-off is that there is no server-side
+ * revocation: logout clears the browser's cookie, and invalidating every
+ * session at once means changing SONDA_SESSION_SECRET.
  */
 
 export const SESSION_COOKIE = 'sonda_session';
-export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 días
+export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const SECRET_FILENAME = 'session-secret';
 
-/** El source que se atribuye a lo que entra con cookie en vez de con token. */
+/** The source attributed to anything ingested with a cookie rather than a token. */
 export const SOURCE_MANUAL = 'manual';
 
 export interface RequestAuth {
@@ -36,10 +36,11 @@ declare module 'fastify' {
 }
 
 /**
- * Devuelve el secreto de firma. Si SONDA_SESSION_SECRET no viene, se genera uno
- * y se guarda en SONDA_DATA_DIR: sin persistirlo, cada reinicio echaría a todo
- * el mundo, que es justo lo que no queremos en un self-hosted que se reinicia
- * con cada actualización de imagen.
+ * Returns the signing secret, generating and persisting one when
+ * SONDA_SESSION_SECRET is not set.
+ *
+ * Persisting matters: without it every restart would log everyone out, which is
+ * exactly wrong for a self-hosted service that restarts on each image update.
  */
 export function resolveSessionSecret(config: Config): string {
   if (config.SONDA_SESSION_SECRET !== undefined) {
@@ -48,26 +49,26 @@ export function resolveSessionSecret(config: Config): string {
 
   const dataDir = resolve(config.SONDA_DATA_DIR);
   mkdirSync(dataDir, { recursive: true });
-  const ruta = join(dataDir, SECRET_FILENAME);
+  const path = join(dataDir, SECRET_FILENAME);
 
-  if (existsSync(ruta)) {
-    const guardado = readFileSync(ruta, 'utf8').trim();
-    if (guardado !== '') return guardado;
+  if (existsSync(path)) {
+    const stored = readFileSync(path, 'utf8').trim();
+    if (stored !== '') return stored;
   }
 
-  const generado = randomBytes(32).toString('base64url');
-  writeFileSync(ruta, `${generado}\n`, { mode: 0o600 });
-  return generado;
+  const generated = randomBytes(32).toString('base64url');
+  writeFileSync(path, `${generated}\n`, { mode: 0o600 });
+  return generated;
 }
 
 function sign(secret: string, payload: string): string {
   return createHmac('sha256', secret).update(payload).digest('base64url');
 }
 
-/** Valor de la cookie: '<caducidad en segundos>.<firma>'. */
+/** Cookie value: '<expiry in seconds>.<signature>'. */
 export function createSessionValue(secret: string, now = Date.now()): string {
-  const expira = Math.floor(now / 1000) + SESSION_TTL_SECONDS;
-  return `${expira}.${sign(secret, String(expira))}`;
+  const expiresAt = Math.floor(now / 1000) + SESSION_TTL_SECONDS;
+  return `${expiresAt}.${sign(secret, String(expiresAt))}`;
 }
 
 export function verifySessionValue(
@@ -77,26 +78,26 @@ export function verifySessionValue(
 ): boolean {
   if (value === undefined) return false;
 
-  const corte = value.indexOf('.');
-  if (corte === -1) return false;
+  const separator = value.indexOf('.');
+  if (separator === -1) return false;
 
-  const expira = value.slice(0, corte);
-  const firma = value.slice(corte + 1);
-  if (!/^\d+$/.test(expira)) return false;
+  const expiresAt = value.slice(0, separator);
+  const signature = value.slice(separator + 1);
+  if (!/^\d+$/.test(expiresAt)) return false;
 
-  const esperada = Buffer.from(sign(secret, expira), 'utf8');
-  const recibida = Buffer.from(firma, 'utf8');
-  if (esperada.length !== recibida.length) return false;
-  if (!timingSafeEqual(esperada, recibida)) return false;
+  const expected = Buffer.from(sign(secret, expiresAt), 'utf8');
+  const received = Buffer.from(signature, 'utf8');
+  if (expected.length !== received.length) return false;
+  if (!timingSafeEqual(expected, received)) return false;
 
-  // La caducidad va firmada, así que solo se comprueba con la firma ya validada.
-  return Number(expira) * 1000 > now;
+  // The expiry is only trusted once the signature over it has been verified.
+  return Number(expiresAt) * 1000 > now;
 }
 
-/** Compara contraseñas sin que el tiempo de respuesta delate el prefijo acertado. */
-export function passwordMatches(esperada: string, recibida: string): boolean {
-  const a = createHmac('sha256', 'sonda-password').update(esperada).digest();
-  const b = createHmac('sha256', 'sonda-password').update(recibida).digest();
+/** Hashing first equalises the lengths, so timingSafeEqual never throws. */
+export function passwordMatches(expected: string, received: string): boolean {
+  const a = createHmac('sha256', 'sonda-password').update(expected).digest();
+  const b = createHmac('sha256', 'sonda-password').update(received).digest();
   return timingSafeEqual(a, b);
 }
 
@@ -104,43 +105,40 @@ export const sessionCookieOptions = {
   httpOnly: true,
   sameSite: 'lax',
   path: '/',
-  // Secure a propósito NO: esto tiene que funcionar sobre HTTP plano en la LAN,
-  // que es como se prueba una app self-hosted el primer día. Expuesto a
-  // internet, va detrás del proxy inverso del usuario.
+  // Secure is deliberately off: this has to work over plain HTTP on a LAN,
+  // which is how a self-hosted app gets tried on day one. Exposed to the
+  // internet, it sits behind the user's own reverse proxy.
   secure: false,
   maxAge: SESSION_TTL_SECONDS,
 } as const;
 
-function sessionValida(request: FastifyRequest): boolean {
+function hasValidSession(request: FastifyRequest): boolean {
   return verifySessionValue(request.server.sessionSecret, request.cookies[SESSION_COOKIE]);
 }
 
-function rechaza(reply: FastifyReply, mensaje: string): FastifyReply {
-  return reply.code(401).send({ error: mensaje });
-}
-
-/** preHandler para lo que la tabla 4.2 marca como 'cookie'. */
+/** preHandler for everything the endpoint table marks as 'cookie'. */
 export async function requireSession(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  if (!sessionValida(request)) {
-    await rechaza(reply, 'Hace falta iniciar sesión');
+  if (!hasValidSession(request)) {
+    await reply.code(401).send({ error: 'Authentication required' });
     return;
   }
   request.auth = { kind: 'session', source: SOURCE_MANUAL };
 }
 
 /**
- * preHandler para lo que la tabla marca como 'cookie o bearer'. Lo que entra con
- * cookie se atribuye al source 'manual': la captura manual es una fuente de
- * ingesta más, no una rama aparte.
+ * preHandler for what the table marks as 'cookie or bearer'.
+ *
+ * Anything arriving with a cookie is attributed to the 'manual' source: manual
+ * capture is just another ingest source, not a separate path.
  */
 export async function requireSessionOrBearer(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  if (sessionValida(request)) {
+  if (hasValidSession(request)) {
     request.auth = { kind: 'session', source: SOURCE_MANUAL };
     return;
   }
@@ -154,5 +152,5 @@ export async function requireSessionOrBearer(
   await reply
     .header('WWW-Authenticate', 'Bearer')
     .code(401)
-    .send({ error: 'Hace falta iniciar sesión o una cabecera Authorization: Bearer <token>' });
+    .send({ error: 'Authentication required: session cookie or Authorization: Bearer <token>' });
 }

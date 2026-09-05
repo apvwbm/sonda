@@ -19,8 +19,7 @@ export interface SeriesRow {
   archived_at: string | null;
 }
 
-const COLUMNS =
-  'id, slug, name, value_type, unit, aggregation, created_at, archived_at';
+const COLUMNS = 'id, slug, name, value_type, unit, aggregation, created_at, archived_at';
 
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -42,13 +41,11 @@ export async function seriesRoutes(app: FastifyInstance): Promise<void> {
      RETURNING ${COLUMNS}`,
   );
 
-  // Auth según la tabla 4.2: el listado también con bearer, porque un script de
-  // ingesta necesita saber qué slugs existen antes de mandar nada.
-  app.get(
-    '/api/series',
-    { preHandler: requireSessionOrBearer },
-    async () => ({ series: selectAll.all() as SeriesRow[] }),
-  );
+  // Listing also accepts a bearer token: an ingest script needs to know which
+  // slugs exist before it sends anything.
+  app.get('/api/series', { preHandler: requireSessionOrBearer }, async () => ({
+    series: selectAll.all() as SeriesRow[],
+  }));
 
   app.post('/api/series', { preHandler: requireSession }, async (request, reply) => {
     const parsed = createSeriesSchema.safeParse(request.body);
@@ -71,7 +68,7 @@ export async function seriesRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(201).send(row);
     } catch (error) {
       if (isUniqueViolation(error)) {
-        return reply.code(409).send({ error: `Ya existe una serie con slug '${slug}'` });
+        return reply.code(409).send({ error: `A series with slug '${slug}' already exists` });
       }
       throw error;
     }
@@ -80,7 +77,7 @@ export async function seriesRoutes(app: FastifyInstance): Promise<void> {
   app.patch('/api/series/:id', { preHandler: requireSession }, async (request, reply) => {
     const params = idParamSchema.safeParse(request.params);
     if (!params.success) {
-      return reply.code(400).send({ error: 'El id debe ser un entero positivo' });
+      return reply.code(400).send({ error: 'id must be a positive integer' });
     }
 
     const parsed = patchSeriesSchema.safeParse(request.body);
@@ -89,12 +86,11 @@ export async function seriesRoutes(app: FastifyInstance): Promise<void> {
     }
 
     if (Object.keys(parsed.data).length === 0) {
-      return reply
-        .code(400)
-        .send({ error: 'No hay nada que cambiar: se espera name, archived_at o ambos' });
+      return reply.code(400).send({ error: 'Nothing to change: expected name, archived_at or both' });
     }
 
-    // Solo las columnas que vinieron: mandar {name} no debe borrar archived_at.
+    // Only the columns that actually arrived: sending {name} must not wipe
+    // archived_at.
     const sets: string[] = [];
     const values: Record<string, unknown> = { id: params.data.id };
 
@@ -111,15 +107,13 @@ export async function seriesRoutes(app: FastifyInstance): Promise<void> {
       .prepare(`UPDATE series SET ${sets.join(', ')} WHERE id = @id RETURNING ${COLUMNS}`)
       .get(values) as SeriesRow | undefined;
 
-    if (!row) {
-      // El UPDATE no tocó nada: o no existe el id, o no había nada que cambiar.
-      const existe = selectById.get(params.data.id) as SeriesRow | undefined;
-      if (!existe) {
-        return reply.code(404).send({ error: `No existe la serie ${params.data.id}` });
-      }
-      return existe;
-    }
+    if (row) return row;
 
-    return row;
+    // RETURNING gave nothing back, which here can only mean the id is unknown.
+    const existing = selectById.get(params.data.id) as SeriesRow | undefined;
+    if (!existing) {
+      return reply.code(404).send({ error: `Series ${params.data.id} does not exist` });
+    }
+    return existing;
   });
 }

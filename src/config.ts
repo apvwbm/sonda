@@ -2,8 +2,8 @@ import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { isValidTimeZone } from './lib/localdate.ts';
 
-// package.json queda un nivel por encima tanto de src/ como de dist/,
-// así que la version del contrato de /api/health tiene una sola fuente.
+// package.json sits one level above both src/ and dist/, so the version
+// reported by GET /api/health has a single source.
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
 
@@ -16,16 +16,13 @@ const envSchema = z.object({
     .string()
     .min(1)
     .default('Europe/Madrid')
-    .refine(isValidTimeZone, { message: 'no es una zona horaria IANA válida' }),
-  SONDA_PASSWORD: z
-    .string({ required_error: 'es obligatoria' })
-    .min(1, 'es obligatoria'),
+    .refine(isValidTimeZone, { message: 'is not a valid IANA time zone' }),
+  SONDA_PASSWORD: z.string({ required_error: 'is required' }).min(1, 'is required'),
   SONDA_SESSION_SECRET: z.string().min(1).optional(),
 });
 
 export type Config = z.infer<typeof envSchema>;
 
-// Las rutas leen SONDA_TZ y compañía por app.config.
 declare module 'fastify' {
   interface FastifyInstance {
     config: Config;
@@ -37,9 +34,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   if (!result.success) {
     const detail = result.error.issues
-      .map((issue) => `  ${issue.path.join('.') || '(raíz)'}: ${issue.message}`)
+      .map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`)
       .join('\n');
-    throw new Error(`Configuración de entorno inválida:\n${detail}`);
+    throw new Error(`Invalid environment configuration:\n${detail}`);
   }
 
   return result.data;

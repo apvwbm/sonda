@@ -5,29 +5,29 @@ import type { FastifyInstance } from 'fastify';
 import { requireSession } from '../auth/session.ts';
 import { toLocalDate } from '../lib/localdate.ts';
 
-const PREFIJO_TEMPORAL = 'export-';
-/** Un temporal más viejo que esto es basura de un proceso que murió a medias. */
-const CADUCIDAD_TEMPORAL_MS = 60 * 60 * 1_000;
+const TEMP_PREFIX = 'export-';
+/** A temp file older than this is debris from a process that died mid-export. */
+const TEMP_MAX_AGE_MS = 60 * 60 * 1_000;
 
 /**
- * Copia consistente con VACUUM INTO, nunca copiando el fichero vivo.
+ * A consistent copy via VACUUM INTO, never by reading the live file.
  *
- * Un `cp` de un SQLite en uso puede pillar la base a medio escribir, y con WAL
- * además deja fuera todo lo que aún no ha hecho checkpoint: el resultado es un
- * backup que parece bueno hasta el día que hace falta. VACUUM INTO escribe una
- * base nueva, compactada y coherente, desde una única instantánea.
+ * `cp` on a SQLite database in use can catch it half-written, and with WAL it
+ * also misses everything not yet checkpointed: the result is a backup that
+ * looks fine until the day it is needed. VACUUM INTO writes a fresh, compacted
+ * database from a single snapshot.
  */
-function limpiaTemporalesViejos(dataDir: string, ahora: number): void {
-  for (const nombre of readdirSync(dataDir)) {
-    if (!nombre.startsWith(PREFIJO_TEMPORAL)) continue;
+function removeStaleTempFiles(dataDir: string, now: number): void {
+  for (const name of readdirSync(dataDir)) {
+    if (!name.startsWith(TEMP_PREFIX)) continue;
 
-    const ruta = join(dataDir, nombre);
+    const path = join(dataDir, name);
     try {
-      if (ahora - statSync(ruta).mtimeMs > CADUCIDAD_TEMPORAL_MS) {
-        rmSync(ruta, { force: true });
+      if (now - statSync(path).mtimeMs > TEMP_MAX_AGE_MS) {
+        rmSync(path, { force: true });
       }
     } catch {
-      // Otro proceso puede haberlo borrado ya, o tenerlo abierto en Windows.
+      // Another process may have removed it already, or hold it open on Windows.
     }
   }
 }
@@ -35,39 +35,39 @@ function limpiaTemporalesViejos(dataDir: string, ahora: number): void {
 export async function exportRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/export', { preHandler: requireSession }, async (request, reply) => {
     const dataDir = resolve(app.config.SONDA_DATA_DIR);
-    limpiaTemporalesViejos(dataDir, Date.now());
+    removeStaleTempFiles(dataDir, Date.now());
 
-    // Nombre aleatorio porque VACUUM INTO se niega si el destino ya existe, y
-    // dentro de SONDA_DATA_DIR porque es el único sitio que sabemos escribible.
-    const temporal = join(dataDir, `${PREFIJO_TEMPORAL}${randomUUID()}.db`);
+    // A random name because VACUUM INTO refuses an existing destination, and
+    // inside SONDA_DATA_DIR because that is the one directory known writable.
+    const tempFile = join(dataDir, `${TEMP_PREFIX}${randomUUID()}.db`);
 
-    app.db.prepare('VACUUM INTO ?').run(temporal);
+    app.db.prepare('VACUUM INTO ?').run(tempFile);
 
-    const borra = (): void => {
+    const remove = (): void => {
       try {
-        rmSync(temporal, { force: true });
+        rmSync(tempFile, { force: true });
       } catch (error) {
-        request.log.warn({ err: error, temporal }, 'no se pudo borrar el export temporal');
+        request.log.warn({ err: error, tempFile }, 'could not remove the temporary export');
       }
     };
 
     try {
-      const bytes = statSync(temporal).size;
-      const fecha = toLocalDate(new Date().toISOString(), app.config.SONDA_TZ);
+      const bytes = statSync(tempFile).size;
+      const date = toLocalDate(new Date().toISOString(), app.config.SONDA_TZ);
 
-      const stream = createReadStream(temporal);
-      // 'close' salta tanto al terminar bien como si el cliente corta a mitad.
-      stream.on('close', borra);
-      stream.on('error', borra);
+      const stream = createReadStream(tempFile);
+      // 'close' fires both on success and when the client aborts mid-download.
+      stream.on('close', remove);
+      stream.on('error', remove);
 
       return await reply
         .header('Content-Type', 'application/vnd.sqlite3')
-        .header('Content-Disposition', `attachment; filename="sonda-${fecha}.db"`)
+        .header('Content-Disposition', `attachment; filename="sonda-${date}.db"`)
         .header('Content-Length', String(bytes))
         .send(stream);
     } catch (error) {
-      // Si no se llegó a abrir el stream, nadie va a borrarlo.
-      borra();
+      // The stream never opened, so nothing else is going to delete the file.
+      remove();
       throw error;
     }
   });

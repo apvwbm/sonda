@@ -3,5 +3,5 @@ node_modules/
 .env
 dist/
 
-# Cookies de sesion de las pruebas con curl.
+# Session cookies left behind by the curl examples.
 cookies.txt

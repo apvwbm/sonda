@@ -1,5 +1,5 @@
-import type { FastifyInstance } from 'fastify';
 import { randomUUID } from 'node:crypto';
+import type { FastifyInstance } from 'fastify';
 import { requireSession, requireSessionOrBearer } from '../auth/session.ts';
 import type { Db } from '../db/index.ts';
 import { toLocalDate } from '../lib/localdate.ts';
@@ -14,10 +14,14 @@ import {
 export interface IngestResult {
   inserted: number;
   updated: number;
+  /**
+   * Spanish on purpose: this field name is part of the agreed API contract and
+   * renaming it would break every ingest script already written against it.
+   */
   series_desconocidas: string[];
 }
 
-/** Error de datos del cliente: aborta el lote entero con un 400. */
+/** Bad client data: aborts the whole batch with a 400. */
 export class IngestValidationError extends Error {}
 
 interface SeriesLookup {
@@ -32,18 +36,19 @@ interface StoredValue {
 }
 
 /**
- * El payload manda un solo 'value'; la tabla tiene value_num y value_text. Cuál
- * de las dos se llena lo decide el value_type de la serie, no el cliente.
+ * The payload carries a single 'value' while the table has value_num and
+ * value_text. Which column gets filled is decided by the series' value_type,
+ * never by the client.
  */
 function toStoredValue(
   value: ObservationInput['value'],
   series: SeriesLookup,
-  indice: number,
+  index: number,
 ): StoredValue {
-  const falla = (esperado: string): never => {
+  const reject = (expected: string): never => {
     throw new IngestValidationError(
-      `observations[${indice}]: la serie '${series.slug}' es de tipo ` +
-        `'${series.value_type}' y espera ${esperado}, y llegó ${JSON.stringify(value)}`,
+      `observations[${index}]: series '${series.slug}' is of type ` +
+        `'${series.value_type}' and expects ${expected}, got ${JSON.stringify(value)}`,
     );
   };
 
@@ -51,41 +56,41 @@ function toStoredValue(
     case 'bool':
       if (typeof value === 'boolean') return { value_num: value ? 1 : 0, value_text: null };
       if (value === 0 || value === 1) return { value_num: value, value_text: null };
-      return falla('true, false, 0 o 1');
+      return reject('true, false, 0 or 1');
 
     case 'number':
       if (typeof value === 'number') return { value_num: value, value_text: null };
-      return falla('un número');
+      return reject('a number');
 
     case 'duration':
-      // La columna guarda segundos; una duración negativa no existe.
+      // The column stores seconds, and a negative duration does not exist.
       if (typeof value === 'number' && value >= 0) return { value_num: value, value_text: null };
-      return falla('un número de segundos no negativo');
+      return reject('a non-negative number of seconds');
 
     case 'text':
       if (typeof value === 'string') return { value_num: null, value_text: value };
-      return falla('una cadena de texto');
+      return reject('a string');
   }
 }
 
 /**
- * Ingesta idempotente. Todo el lote en una transacción: o entra entero o no
- * entra nada. La única excepción no fatal es la serie desconocida, que se
- * reporta y deja pasar al resto.
+ * Idempotent ingest.
+ *
+ * The whole batch runs in one transaction: it either lands complete or not at
+ * all. The single non-fatal exception is an unknown series, which is reported
+ * back and lets the rest through.
  */
 export function ingestObservations(
   db: Db,
   input: { source: string; timeZone: string; observations: ObservationInput[] },
 ): IngestResult {
   const series = db.prepare('SELECT id, slug, value_type FROM series').all() as SeriesLookup[];
-  const porSlug = new Map(series.map((s) => [s.slug, s]));
+  const bySlug = new Map(series.map((s) => [s.slug, s]));
 
-  const yaExiste = db.prepare(
-    'SELECT 1 FROM observations WHERE source = ? AND external_id = ?',
-  );
+  const exists = db.prepare('SELECT 1 FROM observations WHERE source = ? AND external_id = ?');
 
-  // created_at solo se escribe al insertar: una corrección no reescribe cuándo
-  // se registró el dato por primera vez.
+  // created_at is written on insert only: correcting a value must not rewrite
+  // when the data point was first recorded.
   const upsert = db.prepare(`
     INSERT INTO observations
       (series_id, occurred_at, local_date, value_num, value_text, source, external_id, created_at)
@@ -99,61 +104,88 @@ export function ingestObservations(
       value_text  = excluded.value_text
   `);
 
-  const desconocidas = new Set<string>();
+  const unknown = new Set<string>();
   let inserted = 0;
   let updated = 0;
 
   db.transaction(() => {
     const now = new Date().toISOString();
 
-    input.observations.forEach((obs, indice) => {
-      const serie = porSlug.get(obs.series);
-      if (!serie) {
-        desconocidas.add(obs.series);
+    input.observations.forEach((observation, index) => {
+      const target = bySlug.get(observation.series);
+      if (!target) {
+        unknown.add(observation.series);
         return;
       }
 
-      const { value_num, value_text } = toStoredValue(obs.value, serie, indice);
-      const external_id = obs.external_id ?? randomUUID();
+      const { value_num, value_text } = toStoredValue(observation.value, target, index);
+      const externalId = observation.external_id ?? randomUUID();
 
-      // Dentro de la transacción, así que un duplicado dentro del propio lote
-      // también se cuenta como update.
-      const existia = yaExiste.get(input.source, external_id) !== undefined;
+      // Inside the transaction, so a duplicate within the batch itself also
+      // counts as an update rather than a second row.
+      const existed = exists.get(input.source, externalId) !== undefined;
 
       upsert.run({
-        series_id: serie.id,
-        occurred_at: obs.occurred_at,
-        local_date: toLocalDate(obs.occurred_at, input.timeZone),
+        series_id: target.id,
+        occurred_at: observation.occurred_at,
+        local_date: toLocalDate(observation.occurred_at, input.timeZone),
         value_num,
         value_text,
         source: input.source,
-        external_id,
+        external_id: externalId,
         created_at: now,
       });
 
-      if (existia) updated += 1;
+      if (existed) updated += 1;
       else inserted += 1;
     });
   })();
 
-  return {
-    inserted,
-    updated,
-    series_desconocidas: [...desconocidas].sort(),
-  };
+  return { inserted, updated, series_desconocidas: [...unknown].sort() };
+}
+
+export interface ObservationRow {
+  id: number;
+  series: string;
+  occurred_at: string;
+  local_date: string;
+  value: number | string | null;
+  source: string;
+  external_id: string;
+  created_at: string;
+}
+
+/**
+ * Cursor pagination rather than OFFSET: with OFFSET, a row inserted while
+ * paginating shifts every later page and rows get repeated or skipped. The
+ * cursor is the last position read in the (occurred_at, id) order, which is
+ * total and stable.
+ */
+function encodeCursor(row: ObservationRow): string {
+  return Buffer.from(`${row.occurred_at}|${row.id}`, 'utf8').toString('base64url');
+}
+
+function decodeCursor(cursor: string): { occurred_at: string; id: number } | null {
+  const text = Buffer.from(cursor, 'base64url').toString('utf8');
+  const separator = text.lastIndexOf('|');
+  if (separator === -1) return null;
+
+  const occurred_at = text.slice(0, separator);
+  const id = Number(text.slice(separator + 1));
+  if (occurred_at === '' || !Number.isInteger(id)) return null;
+
+  return { occurred_at, id };
 }
 
 export async function observationsRoutes(app: FastifyInstance): Promise<void> {
   const { db } = app;
 
   app.post('/api/observations', { preHandler: requireSessionOrBearer }, async (request, reply) => {
-    // requireSessionOrBearer ya ha dejado aquí el source: del token si vino
-    // bearer, 'manual' si vino cookie. Nunca del payload.
     const auth = request.auth;
     if (!auth) {
-      // Inalcanzable con el preHandler puesto. Si algún día se cae de la ruta,
-      // que falle cerrado en vez de insertar con source undefined.
-      return reply.code(401).send({ error: 'No autenticado' });
+      // Unreachable while the preHandler is in place. If it ever falls off the
+      // route, fail closed instead of inserting with an undefined source.
+      return reply.code(401).send({ error: 'Authentication required' });
     }
 
     const parsed = ingestSchema.safeParse(request.body);
@@ -162,7 +194,7 @@ export async function observationsRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      return ingestObservations(app.db, {
+      return ingestObservations(db, {
         source: auth.source,
         timeZone: app.config.SONDA_TZ,
         observations: parsed.data.observations,
@@ -182,45 +214,46 @@ export async function observationsRoutes(app: FastifyInstance): Promise<void> {
     }
     const { series, from, to, limit, cursor } = parsed.data;
 
-    const filtros: string[] = [];
+    const filters: string[] = [];
+    // One extra row is requested purely to find out whether a next page exists.
     const params: Record<string, unknown> = { limit: limit + 1 };
 
     if (series !== undefined) {
-      const serie = db.prepare('SELECT id FROM series WHERE slug = ?').get(series) as
+      const target = db.prepare('SELECT id FROM series WHERE slug = ?').get(series) as
         | { id: number }
         | undefined;
-      if (!serie) {
-        return reply.code(404).send({ error: `No existe la serie '${series}'` });
+      if (!target) {
+        return reply.code(404).send({ error: `Series '${series}' does not exist` });
       }
-      filtros.push('o.series_id = @series_id');
-      params['series_id'] = serie.id;
+      filters.push('o.series_id = @series_id');
+      params['series_id'] = target.id;
     }
 
-    // from y to filtran por local_date, igual que /api/stats: preguntar por
-    // 'del 1 al 5 de septiembre' es una pregunta de días locales.
+    // from and to filter on local_date, exactly like /api/stats: asking for
+    // 'the 1st to the 5th of September' is a question about local days.
     if (from !== undefined) {
-      filtros.push('o.local_date >= @from');
+      filters.push('o.local_date >= @from');
       params['from'] = from;
     }
     if (to !== undefined) {
-      filtros.push('o.local_date <= @to');
+      filters.push('o.local_date <= @to');
       params['to'] = to;
     }
 
     if (cursor !== undefined) {
-      const punto = decodeCursor(cursor);
-      if (!punto) {
-        return reply.code(400).send({ error: 'El cursor no es válido' });
+      const position = decodeCursor(cursor);
+      if (!position) {
+        return reply.code(400).send({ error: 'Invalid cursor' });
       }
-      // Comparación por tupla: el orden es (occurred_at, id) descendente.
-      filtros.push('(o.occurred_at, o.id) < (@cursor_at, @cursor_id)');
-      params['cursor_at'] = punto.occurred_at;
-      params['cursor_id'] = punto.id;
+      // Row-value comparison, matching the descending (occurred_at, id) order.
+      filters.push('(o.occurred_at, o.id) < (@cursor_at, @cursor_id)');
+      params['cursor_at'] = position.occurred_at;
+      params['cursor_id'] = position.id;
     }
 
-    const where = filtros.length > 0 ? `WHERE ${filtros.join(' AND ')}` : '';
+    const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
 
-    const filas = db
+    const rows = db
       .prepare(
         `SELECT o.id, s.slug AS series, o.occurred_at, o.local_date,
                 CASE WHEN o.value_num IS NOT NULL THEN o.value_num ELSE o.value_text END AS value,
@@ -233,60 +266,27 @@ export async function observationsRoutes(app: FastifyInstance): Promise<void> {
       )
       .all(params) as ObservationRow[];
 
-    // Se pide una fila de más solo para saber si hay página siguiente.
-    const hayMas = filas.length > limit;
-    const observations = hayMas ? filas.slice(0, limit) : filas;
-    const ultima = observations.at(-1);
+    const hasMore = rows.length > limit;
+    const observations = hasMore ? rows.slice(0, limit) : rows;
+    const last = observations.at(-1);
 
     return {
       observations,
-      next_cursor: hayMas && ultima ? encodeCursor(ultima) : null,
+      next_cursor: hasMore && last ? encodeCursor(last) : null,
     };
   });
 
   app.delete('/api/observations/:id', { preHandler: requireSession }, async (request, reply) => {
     const params = idParamSchema.safeParse(request.params);
     if (!params.success) {
-      return reply.code(400).send({ error: 'El id debe ser un entero positivo' });
+      return reply.code(400).send({ error: 'id must be a positive integer' });
     }
 
-    const borrada = db.prepare('DELETE FROM observations WHERE id = ?').run(params.data.id);
-    if (borrada.changes === 0) {
-      return reply.code(404).send({ error: `No existe la observación ${params.data.id}` });
+    const deleted = db.prepare('DELETE FROM observations WHERE id = ?').run(params.data.id);
+    if (deleted.changes === 0) {
+      return reply.code(404).send({ error: `Observation ${params.data.id} does not exist` });
     }
 
     return { deleted: params.data.id };
   });
-}
-
-export interface ObservationRow {
-  id: number;
-  series: string;
-  occurred_at: string;
-  local_date: string;
-  value: number | string | null;
-  source: string;
-  external_id: string;
-  created_at: string;
-}
-
-/**
- * Paginación por cursor y no por OFFSET: con OFFSET, insertar mientras se
- * pagina desplaza las páginas y se repiten o se saltan filas. El cursor es la
- * última posición leída del orden (occurred_at, id), que es total y estable.
- */
-function encodeCursor(row: ObservationRow): string {
-  return Buffer.from(`${row.occurred_at}|${row.id}`, 'utf8').toString('base64url');
-}
-
-function decodeCursor(cursor: string): { occurred_at: string; id: number } | null {
-  const texto = Buffer.from(cursor, 'base64url').toString('utf8');
-  const corte = texto.lastIndexOf('|');
-  if (corte === -1) return null;
-
-  const occurred_at = texto.slice(0, corte);
-  const id = Number(texto.slice(corte + 1));
-  if (occurred_at === '' || !Number.isInteger(id)) return null;
-
-  return { occurred_at, id };
 }

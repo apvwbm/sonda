@@ -2,10 +2,12 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db/index.ts';
 
 /**
- * Tokens de ingesta. La tabla guarda solo el SHA-256: si alguien se lleva el
- * .db no se lleva los tokens. No hace falta bcrypt ni scrypt porque el token no
- * lo elige un humano, son 256 bits de aleatoriedad y no hay diccionario que
- * atacar.
+ * Ingest tokens.
+ *
+ * The table stores only the SHA-256 digest: whoever walks away with the .db
+ * does not walk away with the tokens. bcrypt or scrypt would buy nothing here
+ * because the token is not human-chosen -- it is 256 bits of randomness, and
+ * there is no dictionary to attack.
  */
 
 export interface TokenIdentity {
@@ -27,7 +29,7 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
-/** Extrae el token de 'Authorization: Bearer xxx'. Esquema sin distinguir mayúsculas. */
+/** Scheme match is case-insensitive, as required by RFC 7235. */
 export function parseBearer(header: string | undefined): string | null {
   if (!header) return null;
   const match = /^Bearer +(\S+)$/i.exec(header.trim());
@@ -35,9 +37,11 @@ export function parseBearer(header: string | undefined): string | null {
 }
 
 /**
- * Devuelve el source atado al token, o null. Recorre todas las filas y compara
- * con timingSafeEqual en vez de hacer WHERE token_hash = ?: son cuatro tokens y
- * así la comparación no depende del contenido.
+ * Returns the source bound to the token, or null.
+ *
+ * Walks every row and compares with timingSafeEqual instead of doing
+ * WHERE token_hash = ?. There are a handful of tokens, so the scan is free, and
+ * this way the comparison time does not depend on the contents.
  */
 export function findTokenIdentity(db: Db, token: string): TokenIdentity | null {
   const presented = Buffer.from(hashToken(token), 'hex');
@@ -58,7 +62,7 @@ export function touchToken(db: Db, id: number, when = new Date().toISOString()):
   db.prepare('UPDATE tokens SET last_used_at = ? WHERE id = ?').run(when, id);
 }
 
-/** Autentica y marca el uso. El source resultante es el único que la ingesta acepta. */
+/** Authenticates and records the use. The resulting source is the only one ingest accepts. */
 export function authenticateBearer(db: Db, header: string | undefined): TokenIdentity | null {
   const token = parseBearer(header);
   if (!token) return null;
@@ -77,8 +81,8 @@ export interface MintedToken {
 }
 
 /**
- * Crea (o rota) el token de un source y devuelve el texto plano una única vez:
- * en la base solo queda el hash, así que si se pierde hay que rotarlo.
+ * Creates or rotates the token for a source and returns the plaintext once.
+ * Only the hash is kept, so a lost token cannot be recovered, only rotated.
  */
 export function mintToken(db: Db, source: string, rotate = false): MintedToken {
   const token = generateToken();
@@ -89,8 +93,8 @@ export function mintToken(db: Db, source: string, rotate = false): MintedToken {
 
   if (existing && !rotate) {
     throw new Error(
-      `Ya hay un token para el source '${source}'. Usa --rotate para reemplazarlo ` +
-        `(el anterior dejará de funcionar)`,
+      `A token already exists for source '${source}'. Use --rotate to replace it ` +
+        `(the old one stops working)`,
     );
   }
 
@@ -99,9 +103,11 @@ export function mintToken(db: Db, source: string, rotate = false): MintedToken {
       'UPDATE tokens SET token_hash = ?, created_at = ?, last_used_at = NULL WHERE id = ?',
     ).run(hashToken(token), now, existing.id);
   } else {
-    db.prepare(
-      'INSERT INTO tokens (source, token_hash, created_at) VALUES (?, ?, ?)',
-    ).run(source, hashToken(token), now);
+    db.prepare('INSERT INTO tokens (source, token_hash, created_at) VALUES (?, ?, ?)').run(
+      source,
+      hashToken(token),
+      now,
+    );
   }
 
   return { source, token, rotated: existing !== undefined };

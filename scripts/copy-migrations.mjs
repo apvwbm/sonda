@@ -1,5 +1,5 @@
-// tsc solo emite JS: los .sql hay que llevarlos a dist a mano para que acaben
-// en la imagen de Docker junto al migrate.js que los lee.
+// tsc only emits JS, so the .sql files have to be carried into dist/ by hand
+// for them to reach the Docker image next to the migrate.js that reads them.
 import { cpSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -11,8 +11,8 @@ cpSync(from, to, { recursive: true });
 
 const copied = readdirSync(to).filter((f) => f.endsWith('.sql'));
 if (copied.length === 0) {
-  console.error(`No se copió ninguna migración desde ${from}`);
+  console.error(`No migrations were copied from ${from}`);
   process.exit(1);
 }
 
-console.log(`Migraciones copiadas a dist: ${copied.join(', ')}`);
+console.log(`Migrations copied into dist: ${copied.join(', ')}`);

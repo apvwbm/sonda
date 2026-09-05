@@ -1,9 +1,9 @@
-import type { FastifyError } from 'fastify';
-import cookie from '@fastify/cookie';
-import fastifyStatic from '@fastify/static';
-import Fastify from 'fastify';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
+import type { FastifyError } from 'fastify';
+import Fastify from 'fastify';
 import { resolveSessionSecret } from './auth/session.ts';
 import { loadConfig } from './config.ts';
 import { openDatabase } from './db/index.ts';
@@ -25,8 +25,8 @@ async function main(): Promise<void> {
   app.log.info(
     { schema: migrations.to, applied: migrations.applied },
     migrations.applied.length > 0
-      ? `migraciones aplicadas: ${migrations.applied.join(', ')}`
-      : 'esquema al día, nada que migrar',
+      ? `migrations applied: ${migrations.applied.join(', ')}`
+      : 'schema up to date, nothing to migrate',
   );
 
   app.decorate('db', db);
@@ -35,18 +35,18 @@ async function main(): Promise<void> {
 
   await app.register(cookie);
 
-  // Contrato de la sección 4.2: todo error sale como { "error": "mensaje" }.
+  // Every error leaves as { "error": "message" }, per the API contract.
   app.setErrorHandler((error: FastifyError, request, reply) => {
     const status = error.statusCode ?? 500;
     if (status >= 500) {
       request.log.error(error);
-      return reply.code(500).send({ error: 'Error interno' });
+      return reply.code(500).send({ error: 'Internal error' });
     }
     return reply.code(status).send({ error: error.message });
   });
 
   app.setNotFoundHandler((request, reply) => {
-    reply.code(404).send({ error: `No existe ${request.method} ${request.url}` });
+    reply.code(404).send({ error: `No route for ${request.method} ${request.url}` });
   });
 
   await app.register(healthRoutes);
@@ -56,23 +56,23 @@ async function main(): Promise<void> {
   await app.register(statsRoutes);
   await app.register(exportRoutes);
 
-  // La interfaz compilada, si la hay. Relativo al módulo y no al cwd: vale
-  // igual arrancando desde src/ que desde dist/ dentro del contenedor.
+  // Resolved against the module rather than the cwd, so it works the same
+  // started from src/ or from dist/ inside the container.
   const webDist = join(import.meta.dirname, '..', 'web', 'dist');
   if (existsSync(webDist)) {
-    // wildcard: false registra una ruta por fichero en vez de un catch-all, así
-    // una ruta /api que no existe sigue devolviendo el 404 en JSON del contrato
-    // en lugar de intentar servir un fichero.
+    // wildcard: false registers one route per file instead of a catch-all, so
+    // an unknown /api path still returns the contract's JSON 404 rather than
+    // being swallowed by an attempt to serve a file.
     await app.register(fastifyStatic, { root: webDist, wildcard: false });
-    app.log.info({ webDist }, 'sirviendo la interfaz desde web/dist');
+    app.log.info({ webDist }, 'serving the web interface from web/dist');
   } else {
-    app.log.info('web/dist no existe: solo API');
+    app.log.info('no web/dist directory: API only');
   }
 
-  // Node como PID 1 no trae manejo por defecto de SIGTERM, así que sin esto un
-  // 'docker stop' esperaría los diez segundos de cortesía y mataría a lo bruto.
-  const cierra = (senal: NodeJS.Signals): void => {
-    app.log.info({ senal }, 'cerrando');
+  // Node as PID 1 gets no default SIGTERM handling, so without this a
+  // `docker stop` would wait out the ten-second grace period and then kill.
+  const shutdown = (signal: NodeJS.Signals): void => {
+    app.log.info({ signal }, 'shutting down');
     app
       .close()
       .then(() => {
@@ -80,15 +80,15 @@ async function main(): Promise<void> {
         process.exit(0);
       })
       .catch((error: unknown) => {
-        app.log.error(error, 'fallo al cerrar');
+        app.log.error(error, 'failed to shut down cleanly');
         process.exit(1);
       });
   };
-  for (const senal of ['SIGTERM', 'SIGINT'] as const) {
-    process.once(senal, cierra);
+  for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+    process.once(signal, shutdown);
   }
 
-  // 0.0.0.0 para que el puerto siga siendo alcanzable dentro de un contenedor.
+  // 0.0.0.0 so the port stays reachable from outside a container.
   await app.listen({ port: config.SONDA_PORT, host: '0.0.0.0' });
 }
 

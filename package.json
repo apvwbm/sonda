@@ -2,7 +2,7 @@
   "name": "sonda",
   "version": "0.1.0",
   "private": true,
-  "description": "Almacén y API de datos personales, self-hosted",
+  "description": "Self-hosted store and API for personal data, built around idempotent ingest",
   "type": "module",
   "engines": {
     "node": ">=22.18.0"
@@ -14,7 +14,8 @@
     "test": "tsc -p tsconfig.test.json && node --test \"test/**/*.test.ts\"",
     "typecheck": "tsc -p tsconfig.test.json",
     "token": "node --env-file-if-exists=.env src/cli.ts token",
-    "seed": "node --env-file-if-exists=.env scripts/seed.ts"
+    "seed": "node --env-file-if-exists=.env scripts/seed.ts",
+    "preversion": "npm test"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",

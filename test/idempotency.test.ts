@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import Database from 'better-sqlite3';
 import { beforeEach, describe, it } from 'node:test';
+import Database from 'better-sqlite3';
 import {
   authenticateBearer,
   findTokenIdentity,
@@ -10,22 +10,22 @@ import {
 } from '../src/auth/token.ts';
 import type { Db } from '../src/db/index.ts';
 import { runMigrations } from '../src/db/migrate.ts';
-import { ingestObservations, IngestValidationError } from '../src/routes/observations.ts';
+import { IngestValidationError, ingestObservations } from '../src/routes/observations.ts';
 
 const TZ = 'Europe/Madrid';
 
-/** Base temporal en memoria: se migra igual que la real y muere con el proceso. */
-function baseTemporal(): Db {
+/** In-memory database, migrated exactly like the real one and gone on exit. */
+function temporaryDb(): Db {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   runMigrations(db);
 
   db.prepare(
     `INSERT INTO series (slug, name, value_type, unit, aggregation, created_at) VALUES
-       ('cafe', 'Cafes', 'bool', NULL, 'count', '2026-01-01T00:00:00Z'),
-       ('peso', 'Peso', 'number', 'kg', 'avg', '2026-01-01T00:00:00Z'),
-       ('sueno', 'Sueno', 'duration', 'min', 'sum', '2026-01-01T00:00:00Z'),
-       ('notas', 'Notas', 'text', NULL, 'last', '2026-01-01T00:00:00Z')`,
+       ('coffee', 'Coffees', 'bool', NULL, 'count', '2026-01-01T00:00:00Z'),
+       ('weight', 'Weight', 'number', 'kg', 'avg', '2026-01-01T00:00:00Z'),
+       ('sleep', 'Sleep', 'duration', 'min', 'avg', '2026-01-01T00:00:00Z'),
+       ('notes', 'Notes', 'text', NULL, 'last', '2026-01-01T00:00:00Z')`,
   ).run();
 
   return db;
@@ -33,99 +33,87 @@ function baseTemporal(): Db {
 
 type Observations = Parameters<typeof ingestObservations>[1]['observations'];
 
-const ingesta = (db: Db, observations: Observations) =>
-  ingestObservations(db, { source: 'pruebas', timeZone: TZ, observations });
+const ingest = (db: Db, observations: Observations) =>
+  ingestObservations(db, { source: 'tests', timeZone: TZ, observations });
 
-const contar = (db: Db, sql = 'SELECT COUNT(*) n FROM observations') =>
+const count = (db: Db, sql = 'SELECT COUNT(*) n FROM observations') =>
   (db.prepare(sql).get() as { n: number }).n;
 
 let db: Db;
 beforeEach(() => {
-  db = baseTemporal();
+  db = temporaryDb();
 });
 
-describe('idempotencia: reenviar es corregir, no duplicar', () => {
-  const lote = [
+describe('idempotency: resending is correcting, not duplicating', () => {
+  const batch = [
     {
-      series: 'cafe',
+      series: 'coffee',
       occurred_at: '2026-09-05T08:12:00Z',
       value: 1,
-      external_id: 'cafe-2026-09-05-1',
+      external_id: 'coffee-2026-09-05-1',
     },
     {
-      series: 'peso',
+      series: 'weight',
       occurred_at: '2026-09-05T07:30:00Z',
       value: 74.2,
-      external_id: 'peso-2026-09-05',
+      external_id: 'weight-2026-09-05',
     },
   ];
 
-  it('el mismo lote dos veces deja las mismas filas', () => {
-    assert.deepEqual(ingesta(db, lote), {
-      inserted: 2,
-      updated: 0,
-      series_desconocidas: [],
-    });
-
-    assert.deepEqual(ingesta(db, lote), {
-      inserted: 0,
-      updated: 2,
-      series_desconocidas: [],
-    });
-
-    assert.equal(contar(db), 2);
+  it('the same batch twice leaves the same rows', () => {
+    assert.deepEqual(ingest(db, batch), { inserted: 2, updated: 0, series_desconocidas: [] });
+    assert.deepEqual(ingest(db, batch), { inserted: 0, updated: 2, series_desconocidas: [] });
+    assert.equal(count(db), 2);
   });
 
-  it('el caso del plan: una fila nueva y una corregida en el mismo lote', () => {
-    ingesta(db, [lote[0]!]);
+  it('one new row and one corrected row in the same batch', () => {
+    ingest(db, [batch[0]!]);
 
-    assert.deepEqual(ingesta(db, lote), {
-      inserted: 1,
-      updated: 1,
-      series_desconocidas: [],
-    });
-    assert.equal(contar(db), 2);
+    assert.deepEqual(ingest(db, batch), { inserted: 1, updated: 1, series_desconocidas: [] });
+    assert.equal(count(db), 2);
   });
 
-  it('reenviar 30 dias enteros no duplica nada', () => {
-    const treintaDias = Array.from({ length: 30 }, (_, i) => ({
-      series: 'cafe',
+  it('resending thirty whole days duplicates nothing', () => {
+    const thirtyDays = Array.from({ length: 30 }, (_, i) => ({
+      series: 'coffee',
       occurred_at: `2026-09-${String(i + 1).padStart(2, '0')}T08:00:00Z`,
       value: 1,
-      external_id: `cafe-dia-${i + 1}`,
+      external_id: `coffee-day-${i + 1}`,
     }));
 
-    assert.equal(ingesta(db, treintaDias).inserted, 30);
-    assert.equal(ingesta(db, treintaDias).updated, 30);
-    assert.equal(ingesta(db, treintaDias).updated, 30);
-    assert.equal(contar(db), 30);
+    assert.equal(ingest(db, thirtyDays).inserted, 30);
+    assert.equal(ingest(db, thirtyDays).updated, 30);
+    assert.equal(ingest(db, thirtyDays).updated, 30);
+    assert.equal(count(db), 30);
   });
 
-  it('en conflicto hace UPDATE, no IGNORE: el valor nuevo pisa al viejo', () => {
-    ingesta(db, [
-      { series: 'peso', occurred_at: '2026-09-05T07:30:00Z', value: 74.2, external_id: 'p1' },
+  it('a conflict UPDATEs rather than IGNOREs: the new value wins', () => {
+    ingest(db, [
+      { series: 'weight', occurred_at: '2026-09-05T07:30:00Z', value: 74.2, external_id: 'w1' },
     ]);
-    ingesta(db, [
-      { series: 'peso', occurred_at: '2026-09-05T07:30:00Z', value: 73.8, external_id: 'p1' },
+    ingest(db, [
+      { series: 'weight', occurred_at: '2026-09-05T07:30:00Z', value: 73.8, external_id: 'w1' },
     ]);
 
-    const fila = db.prepare('SELECT value_num FROM observations WHERE external_id = ?').get('p1');
-    assert.deepEqual(fila, { value_num: 73.8 });
-    assert.equal(contar(db), 1);
+    assert.deepEqual(
+      db.prepare('SELECT value_num FROM observations WHERE external_id = ?').get('w1'),
+      { value_num: 73.8 },
+    );
+    assert.equal(count(db), 1);
   });
 
-  it('una correccion no reescribe created_at, pero si occurred_at y local_date', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'c1' },
+  it('a correction keeps created_at but updates occurred_at and local_date', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'c1' },
     ]);
-    const antes = db
+    const before = db
       .prepare('SELECT created_at FROM observations WHERE external_id = ?')
       .get('c1') as { created_at: string };
 
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T23:30:00Z', value: 0, external_id: 'c1' },
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T23:30:00Z', value: 0, external_id: 'c1' },
     ]);
-    const despues = db
+    const after = db
       .prepare(
         'SELECT created_at, occurred_at, local_date, value_num FROM observations WHERE external_id = ?',
       )
@@ -136,66 +124,66 @@ describe('idempotencia: reenviar es corregir, no duplicar', () => {
       value_num: number;
     };
 
-    assert.equal(despues.created_at, antes.created_at);
-    assert.equal(despues.occurred_at, '2026-09-05T23:30:00Z');
-    assert.equal(despues.local_date, '2026-09-06');
-    assert.equal(despues.value_num, 0);
+    assert.equal(after.created_at, before.created_at);
+    assert.equal(after.occurred_at, '2026-09-05T23:30:00Z');
+    assert.equal(after.local_date, '2026-09-06');
+    assert.equal(after.value_num, 0);
   });
 
-  it('el duplicado dentro del propio lote cuenta como update, no como dos filas', () => {
-    const resultado = ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'repe' },
-      { series: 'cafe', occurred_at: '2026-09-05T09:00:00Z', value: 0, external_id: 'repe' },
+  it('a duplicate within the batch itself counts as an update, not two rows', () => {
+    const result = ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'dup' },
+      { series: 'coffee', occurred_at: '2026-09-05T09:00:00Z', value: 0, external_id: 'dup' },
     ]);
 
-    assert.deepEqual(resultado, { inserted: 1, updated: 1, series_desconocidas: [] });
-    assert.equal(contar(db), 1);
+    assert.deepEqual(result, { inserted: 1, updated: 1, series_desconocidas: [] });
+    assert.equal(count(db), 1);
   });
 
-  it('el mismo external_id de otro source es otra fila: la unicidad es del par', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'x' },
+  it('the same external_id from another source is a different row: the pair is what is unique', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'x' },
     ]);
     ingestObservations(db, {
-      source: 'otra-fuente',
+      source: 'another-source',
       timeZone: TZ,
       observations: [
-        { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'x' },
+        { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'x' },
       ],
     });
 
-    assert.equal(contar(db), 2);
+    assert.equal(count(db), 2);
   });
 });
 
-describe('external_id generado', () => {
-  it('sin external_id el servidor pone un UUID', () => {
-    ingesta(db, [{ series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1 }]);
+describe('generated external_id', () => {
+  it('the server assigns a UUID when none is sent', () => {
+    ingest(db, [{ series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1 }]);
 
-    const fila = db.prepare('SELECT external_id FROM observations').get() as {
+    const row = db.prepare('SELECT external_id FROM observations').get() as {
       external_id: string;
     };
     assert.match(
-      fila.external_id,
+      row.external_id,
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
   });
 
-  it('sin external_id NO es idempotente: cada envio es una observacion nueva', () => {
-    // Es la consecuencia de dejarlo opcional, y por eso el plan pide mandarlo
-    // siempre desde los scripts de ingesta.
-    const obs = [{ series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1 }];
-    ingesta(db, obs);
-    ingesta(db, obs);
+  it('without an external_id it is NOT idempotent: every send is a new observation', () => {
+    // The consequence of making it optional, and why ingest scripts are told to
+    // always send one.
+    const observations = [{ series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1 }];
+    ingest(db, observations);
+    ingest(db, observations);
 
-    assert.equal(contar(db), 2);
+    assert.equal(count(db), 2);
   });
 });
 
-describe('local_date lo calcula el servidor', () => {
-  it('usa la zona del servidor, no UTC', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T23:30:00Z', value: 1, external_id: 'tarde' },
+describe('local_date is computed by the server', () => {
+  it('uses the server time zone, not UTC', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T23:30:00Z', value: 1, external_id: 'late' },
     ]);
 
     assert.deepEqual(db.prepare('SELECT local_date FROM observations').get(), {
@@ -203,13 +191,13 @@ describe('local_date lo calcula el servidor', () => {
     });
   });
 
-  it('ignora el local_date que mande el cliente', () => {
-    ingesta(db, [
+  it('ignores a local_date sent by the client', () => {
+    ingest(db, [
       {
-        series: 'cafe',
+        series: 'coffee',
         occurred_at: '2026-09-05T23:30:00Z',
         value: 1,
-        external_id: 'mentira',
+        external_id: 'lie',
         local_date: '1999-01-01',
       } as never,
     ]);
@@ -219,28 +207,28 @@ describe('local_date lo calcula el servidor', () => {
     });
   });
 
-  it('la misma hora UTC cae el mismo dia a un lado y otro del cambio de hora', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-10-24T22:30:00Z', value: 1, external_id: 'a' },
-      { series: 'cafe', occurred_at: '2026-10-25T22:30:00Z', value: 1, external_id: 'b' },
+  it('the same UTC wall time falls on the same day either side of the DST change', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-10-24T22:30:00Z', value: 1, external_id: 'a' },
+      { series: 'coffee', occurred_at: '2026-10-25T22:30:00Z', value: 1, external_id: 'b' },
     ]);
 
-    const dias = db
+    const days = db
       .prepare('SELECT local_date FROM observations ORDER BY external_id')
       .all()
-      .map((f) => (f as { local_date: string }).local_date);
-    assert.deepEqual(dias, ['2026-10-25', '2026-10-25']);
+      .map((row) => (row as { local_date: string }).local_date);
+    assert.deepEqual(days, ['2026-10-25', '2026-10-25']);
   });
 });
 
-describe('el source sale del token, nunca del payload', () => {
-  it('un source en el cuerpo se descarta', () => {
+describe('source comes from the token, never from the payload', () => {
+  it('a source in the body is discarded', () => {
     ingestObservations(db, {
-      source: 'pruebas',
+      source: 'tests',
       timeZone: TZ,
       observations: [
         {
-          series: 'cafe',
+          series: 'coffee',
           occurred_at: '2026-09-05T08:00:00Z',
           value: 1,
           external_id: 'x',
@@ -249,137 +237,129 @@ describe('el source sale del token, nunca del payload', () => {
       ],
     });
 
-    assert.deepEqual(db.prepare('SELECT source FROM observations').get(), { source: 'pruebas' });
+    assert.deepEqual(db.prepare('SELECT source FROM observations').get(), { source: 'tests' });
   });
 });
 
-describe('series desconocidas: se reportan y el resto entra', () => {
-  it('no revienta el lote', () => {
-    const resultado = ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
-      { series: 'inventada', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'b' },
-      { series: 'peso', occurred_at: '2026-09-05T07:00:00Z', value: 74, external_id: 'c' },
+describe('unknown series are reported and the rest goes through', () => {
+  it('does not blow up the batch', () => {
+    const result = ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
+      { series: 'invented', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'b' },
+      { series: 'weight', occurred_at: '2026-09-05T07:00:00Z', value: 74, external_id: 'c' },
     ]);
 
-    assert.deepEqual(resultado, {
-      inserted: 2,
-      updated: 0,
-      series_desconocidas: ['inventada'],
-    });
-    assert.equal(contar(db), 2);
+    assert.deepEqual(result, { inserted: 2, updated: 0, series_desconocidas: ['invented'] });
+    assert.equal(count(db), 2);
   });
 
-  it('cada slug desconocido se reporta una sola vez y ordenado', () => {
-    const resultado = ingesta(db, [
-      { series: 'zeta', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
-      { series: 'alfa', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'b' },
-      { series: 'zeta', occurred_at: '2026-09-05T09:00:00Z', value: 1, external_id: 'c' },
+  it('each unknown slug is reported once and sorted', () => {
+    const result = ingest(db, [
+      { series: 'zulu', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
+      { series: 'alpha', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'b' },
+      { series: 'zulu', occurred_at: '2026-09-05T09:00:00Z', value: 1, external_id: 'c' },
     ]);
 
-    assert.deepEqual(resultado, {
+    assert.deepEqual(result, {
       inserted: 0,
       updated: 0,
-      series_desconocidas: ['alfa', 'zeta'],
+      series_desconocidas: ['alpha', 'zulu'],
     });
-    assert.equal(contar(db), 0);
+    assert.equal(count(db), 0);
   });
 });
 
-describe('el value se guarda segun el value_type de la serie', () => {
-  it('bool acepta booleanos y 0/1, y guarda 0/1 en value_num', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: true, external_id: 'a' },
-      { series: 'cafe', occurred_at: '2026-09-05T09:00:00Z', value: false, external_id: 'b' },
-      { series: 'cafe', occurred_at: '2026-09-05T10:00:00Z', value: 1, external_id: 'c' },
+describe('value is stored according to the series value_type', () => {
+  it('bool accepts booleans and 0/1, and stores 0/1 in value_num', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: true, external_id: 'a' },
+      { series: 'coffee', occurred_at: '2026-09-05T09:00:00Z', value: false, external_id: 'b' },
+      { series: 'coffee', occurred_at: '2026-09-05T10:00:00Z', value: 1, external_id: 'c' },
     ]);
 
-    const valores = db
+    const values = db
       .prepare('SELECT value_num FROM observations ORDER BY external_id')
       .all()
-      .map((f) => (f as { value_num: number }).value_num);
-    assert.deepEqual(valores, [1, 0, 1]);
+      .map((row) => (row as { value_num: number }).value_num);
+    assert.deepEqual(values, [1, 0, 1]);
   });
 
-  it('text va a value_text y deja value_num a null', () => {
-    ingesta(db, [
-      { series: 'notas', occurred_at: '2026-09-05T08:00:00Z', value: 'buen dia', external_id: 'n' },
+  it('text goes to value_text and leaves value_num null', () => {
+    ingest(db, [
+      { series: 'notes', occurred_at: '2026-09-05T08:00:00Z', value: 'good day', external_id: 'n' },
     ]);
 
     assert.deepEqual(db.prepare('SELECT value_num, value_text FROM observations').get(), {
       value_num: null,
-      value_text: 'buen dia',
+      value_text: 'good day',
     });
   });
 
-  it('un tipo que no cuadra aborta el lote entero', () => {
+  it('a mismatched type aborts the whole batch', () => {
     assert.throws(
       () =>
-        ingesta(db, [
-          { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
-          { series: 'peso', occurred_at: '2026-09-05T08:00:00Z', value: 'gordo', external_id: 'b' },
+        ingest(db, [
+          { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'a' },
+          { series: 'weight', occurred_at: '2026-09-05T08:00:00Z', value: 'heavy', external_id: 'b' },
         ]),
       IngestValidationError,
     );
 
-    // La transaccion revierte tambien la observacion buena que iba delante.
-    assert.equal(contar(db), 0);
+    // The transaction rolls back the good observation that came first too.
+    assert.equal(count(db), 0);
   });
 
-  it('rechaza duraciones negativas', () => {
+  it('rejects negative durations', () => {
     assert.throws(
       () =>
-        ingesta(db, [
-          { series: 'sueno', occurred_at: '2026-09-05T08:00:00Z', value: -60, external_id: 'a' },
+        ingest(db, [
+          { series: 'sleep', occurred_at: '2026-09-05T08:00:00Z', value: -60, external_id: 'a' },
         ]),
       IngestValidationError,
     );
   });
 });
 
-describe('la transaccion envuelve el lote entero', () => {
-  it('un fallo a mitad no deja nada escrito', () => {
-    ingesta(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'previo' },
+describe('the transaction wraps the whole batch', () => {
+  it('a failure halfway through writes nothing', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: 1, external_id: 'earlier' },
     ]);
 
     assert.throws(() =>
-      ingesta(db, [
-        { series: 'cafe', occurred_at: '2026-09-06T08:00:00Z', value: 1, external_id: 'nuevo' },
-        { series: 'notas', occurred_at: '2026-09-06T08:00:00Z', value: 999, external_id: 'malo' },
+      ingest(db, [
+        { series: 'coffee', occurred_at: '2026-09-06T08:00:00Z', value: 1, external_id: 'new' },
+        { series: 'notes', occurred_at: '2026-09-06T08:00:00Z', value: 999, external_id: 'bad' },
       ]),
     );
 
-    // Solo sobrevive lo de la transaccion anterior.
-    assert.equal(contar(db), 1);
-    assert.equal(
-      contar(db, "SELECT COUNT(*) n FROM observations WHERE external_id = 'nuevo'"),
-      0,
-    );
+    assert.equal(count(db), 1);
+    assert.equal(count(db, "SELECT COUNT(*) n FROM observations WHERE external_id = 'new'"), 0);
   });
 
-  it('un lote vacio no hace nada y responde ceros', () => {
-    assert.deepEqual(ingesta(db, []), { inserted: 0, updated: 0, series_desconocidas: [] });
+  it('an empty batch does nothing and answers zeroes', () => {
+    assert.deepEqual(ingest(db, []), { inserted: 0, updated: 0, series_desconocidas: [] });
   });
 });
 
 describe('tokens', () => {
-  it('en la base solo queda el hash, nunca el token', () => {
+  it('only the hash is stored, never the token', () => {
     const { token } = mintToken(db, 'opengym');
-    const fila = db.prepare('SELECT token_hash FROM tokens WHERE source = ?').get('opengym') as {
+    const row = db.prepare('SELECT token_hash FROM tokens WHERE source = ?').get('opengym') as {
       token_hash: string;
     };
 
-    assert.notEqual(fila.token_hash, token);
-    assert.equal(fila.token_hash, hashToken(token));
-    assert.match(fila.token_hash, /^[0-9a-f]{64}$/);
+    assert.notEqual(row.token_hash, token);
+    assert.equal(row.token_hash, hashToken(token));
+    assert.match(row.token_hash, /^[0-9a-f]{64}$/);
   });
 
-  it('el token devuelve su source', () => {
+  it('a token resolves to its source', () => {
     const { token } = mintToken(db, 'opengym');
     assert.equal(findTokenIdentity(db, token)?.source, 'opengym');
   });
 
-  it('cada source tiene su token y no se cruzan', () => {
+  it('each source has its own token and they do not cross', () => {
     const a = mintToken(db, 'opengym');
     const b = mintToken(db, 'jellyfin');
 
@@ -387,49 +367,47 @@ describe('tokens', () => {
     assert.equal(findTokenIdentity(db, b.token)?.source, 'jellyfin');
   });
 
-  it('un token inventado no autentica', () => {
+  it('a made-up token does not authenticate', () => {
     mintToken(db, 'opengym');
-    for (const malo of ['', 'x', 'a'.repeat(43)]) {
-      assert.equal(findTokenIdentity(db, malo), null, JSON.stringify(malo));
+    for (const bad of ['', 'x', 'a'.repeat(43)]) {
+      assert.equal(findTokenIdentity(db, bad), null, JSON.stringify(bad));
     }
   });
 
-  it('no deja dos tokens para el mismo source sin --rotate', () => {
+  it('refuses a second token for the same source without --rotate', () => {
     mintToken(db, 'opengym');
     assert.throws(() => mintToken(db, 'opengym'), /--rotate/);
   });
 
-  it('rotar invalida el anterior', () => {
-    const viejo = mintToken(db, 'opengym');
-    const nuevo = mintToken(db, 'opengym', true);
+  it('rotating invalidates the previous one', () => {
+    const old = mintToken(db, 'opengym');
+    const fresh = mintToken(db, 'opengym', true);
 
-    assert.equal(findTokenIdentity(db, viejo.token), null);
-    assert.equal(findTokenIdentity(db, nuevo.token)?.source, 'opengym');
-    assert.equal(contar(db, 'SELECT COUNT(*) n FROM tokens'), 1);
+    assert.equal(findTokenIdentity(db, old.token), null);
+    assert.equal(findTokenIdentity(db, fresh.token)?.source, 'opengym');
+    assert.equal(count(db, 'SELECT COUNT(*) n FROM tokens'), 1);
   });
 
-  it('parseBearer acepta el esquema en cualquier caja y rechaza el resto', () => {
+  it('parseBearer accepts any casing of the scheme and rejects the rest', () => {
     assert.equal(parseBearer('Bearer abc'), 'abc');
     assert.equal(parseBearer('bearer abc'), 'abc');
     assert.equal(parseBearer('  Bearer   abc  '), 'abc');
-    for (const malo of [undefined, '', 'abc', 'Basic abc', 'Bearer', 'Bearer a b']) {
-      assert.equal(parseBearer(malo), null, JSON.stringify(malo));
+    for (const bad of [undefined, '', 'abc', 'Basic abc', 'Bearer', 'Bearer a b']) {
+      assert.equal(parseBearer(bad), null, JSON.stringify(bad));
     }
   });
 
-  it('authenticateBearer actualiza last_used_at', () => {
+  it('authenticateBearer records last_used_at', () => {
     const { token } = mintToken(db, 'opengym');
     assert.deepEqual(db.prepare('SELECT last_used_at FROM tokens').get(), { last_used_at: null });
 
     assert.equal(authenticateBearer(db, `Bearer ${token}`)?.source, 'opengym');
 
-    const despues = db.prepare('SELECT last_used_at FROM tokens').get() as {
-      last_used_at: string;
-    };
-    assert.match(despues.last_used_at, /^\d{4}-\d{2}-\d{2}T/);
+    const after = db.prepare('SELECT last_used_at FROM tokens').get() as { last_used_at: string };
+    assert.match(after.last_used_at, /^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it('sin cabecera no autentica y no toca last_used_at', () => {
+  it('no header means no authentication and no touch to last_used_at', () => {
     mintToken(db, 'opengym');
     assert.equal(authenticateBearer(db, undefined), null);
     assert.deepEqual(db.prepare('SELECT last_used_at FROM tokens').get(), { last_used_at: null });

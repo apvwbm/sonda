@@ -1,20 +1,20 @@
 # syntax=docker/dockerfile:1
 #
-# SIN VERIFICAR: escrito sin Docker disponible en la máquina de desarrollo.
-# Ni el build ni el run se han ejecutado nunca. Ver docs/readme-notes.md.
+# UNVERIFIED: written without Docker available on the development machine.
+# Neither the build nor the run has ever been executed.
 
-# ---------------------------------------------------------------- compilación
+# --------------------------------------------------------------------- build
 FROM node:22-alpine AS build
 
-# node-gyp, por si better-sqlite3 tuviera que compilarse.
-# Con la versión actual no llega a hacerlo: declara "gypfile": false y trae
-# binarios precompilados para linuxmusl x64 y arm64. Esto está aquí para el día
-# que falte el prebuild de una plataforma, y se descarta con la etapa.
+# node-gyp, in case better-sqlite3 ever has to compile. With the current version
+# it does not: it declares "gypfile": false and ships prebuilt binaries for
+# linuxmusl x64 and arm64. This is here for the day a platform's prebuild is
+# missing, and it is discarded along with the stage.
 RUN apk add --no-cache python3 make g++
 
 WORKDIR /app
 
-# Las dependencias en su propia capa: tocar el código no invalida el npm ci.
+# Dependencies in their own layer: touching source does not invalidate npm ci.
 COPY package.json package-lock.json ./
 RUN npm ci
 
@@ -22,16 +22,15 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY scripts/copy-migrations.mjs ./scripts/
 
-# tsc a dist/ y copia de los .sql de migración junto al JS que los lee.
 RUN npm run build
 
-# Deja node_modules solo con producción, conservando el binario nativo ya
-# resuelto para musl. Hacerlo aquí y no un npm ci --omit=dev aparte evita
-# resolver las dependencias dos veces.
+# Strip node_modules down to production, keeping the native binary already
+# resolved for musl. Doing it here rather than as a separate npm ci --omit=dev
+# avoids resolving the dependency tree twice.
 RUN npm prune --omit=dev
 
 
-# --------------------------------------------------------------- imagen final
+# ------------------------------------------------------------- runtime image
 FROM node:22-alpine AS runtime
 
 ENV NODE_ENV=production \
@@ -42,31 +41,30 @@ WORKDIR /app
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-# GET /api/health lee la versión de aquí; es la única fuente.
+# GET /api/health reads the version from here; it is the single source.
 COPY package.json ./
 
-# Nada de src/ ni de scripts/: acuñar tokens dentro del contenedor se hace con
-# dist/cli.js, que sí viaja compilado. El seed se queda fuera a propósito, no
-# tiene sentido sembrar datos falsos en producción.
+# No src/ and no scripts/: minting a token inside the container is done with
+# dist/cli.js, which does ship compiled. The seed is left out on purpose.
 
-# El uid 1000 ('node') es el dueño del punto de montaje. Un volumen con nombre
-# hereda este dueño y funciona sin tocar nada; un bind mount hereda el del
-# directorio del host, que tiene que ser escribible por el uid 1000.
+# uid 1000 ('node') owns the mount point. A named volume inherits this owner and
+# just works; a bind mount inherits the host directory's owner, which therefore
+# has to be writable by uid 1000.
 RUN mkdir -p /data && chown node:node /data
 USER node
 
 EXPOSE 8080
 VOLUME /data
 
-# En forma shell a propósito, para que ${SONDA_PORT} se expanda al arrancar y el
-# healthcheck siga valiendo si se cambia el puerto por variable de entorno.
-# wget viene en el busybox de alpine: no hace falta instalar curl.
+# Shell form on purpose, so ${SONDA_PORT} expands at run time and the health
+# check keeps working when the port is changed through the environment.
+# wget ships with alpine's busybox; there is no need to install curl.
 #
-# El timeout es generoso porque better-sqlite3 es síncrono y un GET /api/export
-# sobre una base grande bloquea el event loop mientras dura.
+# The timeout is generous because better-sqlite3 is synchronous, and a
+# GET /api/export over a large database blocks the event loop while it runs.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -q -O /dev/null "http://127.0.0.1:${SONDA_PORT:-8080}/api/health" || exit 1
 
-# Forma exec: node queda como PID 1 y recibe la señal directa de docker stop.
-# src/index.ts maneja SIGTERM y cierra ordenado, así que no hace falta tini.
+# Exec form: node stays PID 1 and receives docker stop's signal directly.
+# src/index.ts handles SIGTERM and shuts down cleanly, so tini is not needed.
 CMD ["node", "dist/index.js"]

@@ -5,7 +5,6 @@ import type { Config } from '../config.ts';
 
 export type Db = Database.Database;
 
-// Las rutas llegan a la base por app.db, decorada una sola vez en index.ts.
 declare module 'fastify' {
   interface FastifyInstance {
     db: Db;
@@ -15,8 +14,10 @@ declare module 'fastify' {
 export const DB_FILENAME = 'sonda.db';
 
 /**
- * Abre la base, creando SONDA_DATA_DIR si hace falta. Los PRAGMAs van aquí y no
- * en una migración: son de conexión, hay que repetirlos en cada arranque.
+ * Opens the database, creating SONDA_DATA_DIR if needed.
+ *
+ * The PRAGMAs live here rather than in a migration because they are per
+ * connection, not per schema: they have to be reapplied on every start.
  */
 export function openDatabase(config: Config): Db {
   const dataDir = resolve(config.SONDA_DATA_DIR);

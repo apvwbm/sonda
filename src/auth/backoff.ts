@@ -1,84 +1,78 @@
 /**
- * Freno de fuerza bruta para /api/auth/login.
+ * Brute-force brake for POST /api/auth/login.
  *
- * En memoria y por IP, sin dependencias ni tabla: reiniciar el servidor lo
- * limpia, lo cual es aceptable porque el objetivo no es un WAF, es que probar
- * contraseñas a ciegas contra una instancia expuesta pase de miles por minuto a
- * un puñado por hora.
+ * In memory and per IP, with no dependency and no table: restarting clears it,
+ * which is acceptable because the goal is not to be a WAF. It is to turn blind
+ * password guessing against an exposed instance from thousands per minute into
+ * a handful per hour.
  *
- * Los cuatro primeros fallos salen gratis: equivocarse escribiendo la
- * contraseña es normal. Del quinto en adelante se bloquea con espera que dobla
- * cada vez, hasta un techo.
+ * The first few failures are free because mistyping a password is normal.
  */
 
-export const FALLOS_GRATIS = 4;
-export const ESPERA_BASE_MS = 1_000;
-export const ESPERA_MAXIMA_MS = 5 * 60 * 1_000;
-/** Una entrada sin actividad durante este tiempo se olvida. */
-export const OLVIDO_MS = 60 * 60 * 1_000;
+export const FREE_ATTEMPTS = 4;
+export const BASE_DELAY_MS = 1_000;
+export const MAX_DELAY_MS = 5 * 60 * 1_000;
+/** An entry idle for longer than this is forgotten. */
+export const FORGET_AFTER_MS = 60 * 60 * 1_000;
 
-interface Intentos {
-  fallos: number;
-  bloqueadaHasta: number;
-  visto: number;
+interface Attempts {
+  failures: number;
+  blockedUntil: number;
+  lastSeen: number;
 }
 
-export interface EstadoBloqueo {
-  bloqueada: boolean;
-  /** Segundos que faltan, redondeados hacia arriba. Cero si no está bloqueada. */
+export interface BlockState {
+  blocked: boolean;
+  /** Seconds left, rounded up. Zero when not blocked. */
   retryAfter: number;
 }
 
-const LIBRE: EstadoBloqueo = { bloqueada: false, retryAfter: 0 };
+const NOT_BLOCKED: BlockState = { blocked: false, retryAfter: 0 };
 
-function esperaTras(fallos: number): number {
-  const exponente = fallos - FALLOS_GRATIS - 1;
-  return Math.min(ESPERA_BASE_MS * 2 ** exponente, ESPERA_MAXIMA_MS);
+function delayAfter(failures: number): number {
+  return Math.min(BASE_DELAY_MS * 2 ** (failures - FREE_ATTEMPTS - 1), MAX_DELAY_MS);
 }
 
 export class LoginBackoff {
-  readonly #porIp = new Map<string, Intentos>();
+  readonly #byIp = new Map<string, Attempts>();
 
-  /** Solo para tests: cuántas IPs se están recordando. */
+  /** Number of IPs currently remembered. Used by the tests. */
   get size(): number {
-    return this.#porIp.size;
+    return this.#byIp.size;
   }
 
-  #limpia(ahora: number): void {
-    for (const [ip, intentos] of this.#porIp) {
-      if (ahora - intentos.visto > OLVIDO_MS) this.#porIp.delete(ip);
+  #prune(now: number): void {
+    for (const [ip, attempts] of this.#byIp) {
+      if (now - attempts.lastSeen > FORGET_AFTER_MS) this.#byIp.delete(ip);
     }
   }
 
-  /** Se llama antes de comprobar la contraseña. */
-  check(ip: string, ahora = Date.now()): EstadoBloqueo {
-    this.#limpia(ahora);
+  /** Called before checking the password. */
+  check(ip: string, now = Date.now()): BlockState {
+    this.#prune(now);
 
-    const intentos = this.#porIp.get(ip);
-    if (!intentos || intentos.bloqueadaHasta <= ahora) return LIBRE;
+    const attempts = this.#byIp.get(ip);
+    if (!attempts || attempts.blockedUntil <= now) return NOT_BLOCKED;
 
-    return {
-      bloqueada: true,
-      retryAfter: Math.ceil((intentos.bloqueadaHasta - ahora) / 1000),
-    };
+    return { blocked: true, retryAfter: Math.ceil((attempts.blockedUntil - now) / 1000) };
   }
 
-  /** Registra un intento fallido y devuelve el bloqueo resultante. */
-  fail(ip: string, ahora = Date.now()): EstadoBloqueo {
-    const intentos = this.#porIp.get(ip) ?? { fallos: 0, bloqueadaHasta: 0, visto: ahora };
-    intentos.fallos += 1;
-    intentos.visto = ahora;
+  /** Records a failed attempt and returns the resulting block. */
+  fail(ip: string, now = Date.now()): BlockState {
+    const attempts = this.#byIp.get(ip) ?? { failures: 0, blockedUntil: 0, lastSeen: now };
+    attempts.failures += 1;
+    attempts.lastSeen = now;
 
-    if (intentos.fallos > FALLOS_GRATIS) {
-      intentos.bloqueadaHasta = ahora + esperaTras(intentos.fallos);
+    if (attempts.failures > FREE_ATTEMPTS) {
+      attempts.blockedUntil = now + delayAfter(attempts.failures);
     }
 
-    this.#porIp.set(ip, intentos);
-    return this.check(ip, ahora);
+    this.#byIp.set(ip, attempts);
+    return this.check(ip, now);
   }
 
-  /** Un login correcto borra el historial de esa IP. */
+  /** A successful login clears that IP's history. */
   success(ip: string): void {
-    this.#porIp.delete(ip);
+    this.#byIp.delete(ip);
   }
 }

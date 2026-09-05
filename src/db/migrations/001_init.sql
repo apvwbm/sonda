@@ -1,6 +1,6 @@
 CREATE TABLE series (
   id           INTEGER PRIMARY KEY,
-  slug         TEXT NOT NULL UNIQUE,          -- 'cafe', 'peso', 'sueno'
+  slug         TEXT NOT NULL UNIQUE,          -- 'coffee', 'weight', 'sleep'
   name         TEXT NOT NULL,
   value_type   TEXT NOT NULL CHECK (value_type IN ('bool','number','duration','text')),
   unit         TEXT,                          -- 'kg', 'min', NULL
@@ -12,9 +12,9 @@ CREATE TABLE series (
 CREATE TABLE observations (
   id           INTEGER PRIMARY KEY,
   series_id    INTEGER NOT NULL REFERENCES series(id),
-  occurred_at  TEXT NOT NULL,                 -- instante ISO 8601 UTC
-  local_date   TEXT NOT NULL,                 -- 'YYYY-MM-DD', calculado en el servidor
-  value_num    REAL,                          -- bool como 0/1, número, duración en segundos
+  occurred_at  TEXT NOT NULL,                 -- ISO 8601 UTC instant
+  local_date   TEXT NOT NULL,                 -- 'YYYY-MM-DD', computed server-side
+  value_num    REAL,                          -- bool as 0/1, number, duration in seconds
   value_text   TEXT,
   source       TEXT NOT NULL,                 -- 'manual', 'opengym', 'jellyfin'
   external_id  TEXT NOT NULL,
@@ -26,7 +26,7 @@ CREATE INDEX idx_obs_series_date ON observations (series_id, local_date);
 
 CREATE TABLE tokens (
   id           INTEGER PRIMARY KEY,
-  source       TEXT NOT NULL UNIQUE,          -- el token queda atado a un 'source'
+  source       TEXT NOT NULL UNIQUE,          -- a token is bound to one 'source'
   token_hash   TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   last_used_at TEXT

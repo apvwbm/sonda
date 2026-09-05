@@ -17,31 +17,13 @@ export interface StatsResult {
   buckets: StatsBucket[];
 }
 
-export class SeriesDesconocida extends Error {}
+export class UnknownSeriesError extends Error {}
 
 interface SeriesRow {
   id: number;
   aggregation: Aggregation;
   unit: string | null;
 }
-
-/**
- * Agrupa por local_date, no por occurred_at.
- *
- * Es la diferencia entre "¿he leído hoy?" y "¿he leído en el intervalo UTC de
- * hoy?": quien se acuesta a las dos de la mañana vería sus datos en el día
- * equivocado si esto agrupara por el instante. local_date ya viene calculado en
- * la zona del servidor desde la ingesta, así que aquí basta con agrupar por
- * texto y no hay conversiones de huso en la consulta.
- */
-const BUCKET_SQL: Record<Bucket, string> = {
-  day: 'local_date',
-  // La semana empieza en lunes: retroceder seis días y saltar al lunes
-  // siguiente aterriza siempre en el lunes de la propia semana, también cuando
-  // local_date ya es lunes o es domingo.
-  week: "date(local_date, '-6 days', 'weekday 1')",
-  month: "date(local_date, 'start of month')",
-};
 
 export interface StatsQuery {
   series: string;
@@ -51,43 +33,70 @@ export interface StatsQuery {
 }
 
 /**
- * Toda la agregación ocurre en SQLite; JavaScript solo arma la consulta y
- * envuelve la respuesta. Un bucket sin observaciones simplemente no sale del
- * GROUP BY, así que no hay huecos que rellenar ni ceros inventados.
+ * Grouping happens on local_date, not on occurred_at.
+ *
+ * That is the difference between "did I read today?" and "did I read during
+ * today's UTC interval?": someone who goes to bed at 2am would see their data
+ * on the wrong day if this grouped by the instant. local_date was already
+ * computed in the server's zone at ingest time, so grouping here is plain text
+ * comparison with no time zone conversion in the query.
+ */
+const BUCKET_SQL: Record<Bucket, string> = {
+  day: 'local_date',
+  // Weeks start on Monday. Going back six days and then jumping to the next
+  // Monday always lands on that week's own Monday, including when local_date is
+  // itself a Monday or a Sunday.
+  week: "date(local_date, '-6 days', 'weekday 1')",
+  month: "date(local_date, 'start of month')",
+};
+
+// ROUND to six decimals only removes floating-point representation noise
+// (AVG was returning 76.35999999999999 instead of 76.36). Six decimals sit far
+// beyond any real measurement that lands in here.
+const AGGREGATE_SQL: Record<Exclude<Aggregation, 'last'>, string> = {
+  sum: 'ROUND(SUM(value_num), 6)',
+  avg: 'ROUND(AVG(value_num), 6)',
+  count: 'COUNT(*)',
+};
+
+/**
+ * All aggregation happens inside SQLite; JavaScript only assembles the query
+ * and wraps the answer. A bucket with no observations simply never comes out of
+ * the GROUP BY, so there are no gaps to fill and no invented zeroes.
  */
 export function computeStats(db: Db, query: StatsQuery): StatsResult {
-  const serie = db
+  const series = db
     .prepare('SELECT id, aggregation, unit FROM series WHERE slug = ?')
     .get(query.series) as SeriesRow | undefined;
 
-  if (!serie) {
-    throw new SeriesDesconocida(`No existe la serie '${query.series}'`);
+  if (!series) {
+    throw new UnknownSeriesError(`Series '${query.series}' does not exist`);
   }
 
   const bucketExpr = BUCKET_SQL[query.bucket];
-  const filtros = ['series_id = @series_id'];
-  const params: Record<string, unknown> = { series_id: serie.id };
+  const filters = ['series_id = @series_id'];
+  const params: Record<string, unknown> = { series_id: series.id };
 
   if (query.from !== undefined) {
-    filtros.push('local_date >= @from');
+    filters.push('local_date >= @from');
     params['from'] = query.from;
   }
   if (query.to !== undefined) {
-    filtros.push('local_date <= @to');
+    filters.push('local_date <= @to');
     params['to'] = query.to;
   }
-  const where = filtros.join(' AND ');
+  const where = filters.join(' AND ');
 
-  // 'last' no es una función de agregación: es la observación más reciente de
-  // cada bucket. Se resuelve con una ventana y se sigue quedando en SQL.
+  // 'last' is not an aggregate function: it is the most recent observation of
+  // each bucket. A window function resolves it and keeps the work in SQL.
   const sql =
-    serie.aggregation === 'last'
+    series.aggregation === 'last'
       ? `
-        SELECT bucket AS date, valor AS value, n AS count
+        SELECT bucket AS date, picked AS value, n AS count
         FROM (
           SELECT
             ${bucketExpr} AS bucket,
-            CASE WHEN value_num IS NOT NULL THEN value_num ELSE value_text END AS valor,
+            CASE WHEN value_num IS NOT NULL THEN value_num ELSE value_text END AS picked,
             COUNT(*)     OVER (PARTITION BY ${bucketExpr}) AS n,
             ROW_NUMBER() OVER (PARTITION BY ${bucketExpr}
                                ORDER BY occurred_at DESC, id DESC) AS rn
@@ -100,7 +109,7 @@ export function computeStats(db: Db, query: StatsQuery): StatsResult {
       : `
         SELECT
           ${bucketExpr} AS date,
-          ${AGREGADO[serie.aggregation]} AS value,
+          ${AGGREGATE_SQL[series.aggregation]} AS value,
           COUNT(*) AS count
         FROM observations
         WHERE ${where}
@@ -108,24 +117,13 @@ export function computeStats(db: Db, query: StatsQuery): StatsResult {
         ORDER BY date
       `;
 
-  const buckets = db.prepare(sql).all(params) as StatsBucket[];
-
   return {
     series: query.series,
-    aggregation: serie.aggregation,
-    unit: serie.unit,
-    buckets,
+    aggregation: series.aggregation,
+    unit: series.unit,
+    buckets: db.prepare(sql).all(params) as StatsBucket[],
   };
 }
-
-// ROUND a seis decimales solo para quitar el ruido de la representación en
-// coma flotante (AVG devolvía 76.35999999999999 por 76.36). Seis decimales
-// están muy por encima de cualquier medida real que entre aquí.
-const AGREGADO: Record<Exclude<Aggregation, 'last'>, string> = {
-  sum: 'ROUND(SUM(value_num), 6)',
-  avg: 'ROUND(AVG(value_num), 6)',
-  count: 'COUNT(*)',
-};
 
 export async function statsRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/stats', { preHandler: requireSession }, async (request, reply) => {
@@ -137,7 +135,7 @@ export async function statsRoutes(app: FastifyInstance): Promise<void> {
     try {
       return computeStats(app.db, parsed.data);
     } catch (error) {
-      if (error instanceof SeriesDesconocida) {
+      if (error instanceof UnknownSeriesError) {
         return reply.code(404).send({ error: error.message });
       }
       throw error;

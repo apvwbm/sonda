@@ -1,25 +1,25 @@
 import assert from 'node:assert/strict';
-import Database from 'better-sqlite3';
 import { beforeEach, describe, it } from 'node:test';
+import Database from 'better-sqlite3';
 import type { Db } from '../src/db/index.ts';
 import { runMigrations } from '../src/db/migrate.ts';
 import { ingestObservations } from '../src/routes/observations.ts';
-import { SeriesDesconocida, computeStats } from '../src/routes/stats.ts';
+import { UnknownSeriesError, computeStats } from '../src/routes/stats.ts';
 
 const TZ = 'Europe/Madrid';
 
-function baseTemporal(): Db {
+function temporaryDb(): Db {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   runMigrations(db);
 
   db.prepare(
     `INSERT INTO series (slug, name, value_type, unit, aggregation, created_at) VALUES
-       ('pasos', 'Pasos', 'number', 'pasos', 'sum', '2026-01-01T00:00:00Z'),
-       ('peso', 'Peso', 'number', 'kg', 'avg', '2026-01-01T00:00:00Z'),
-       ('cafe', 'Cafes', 'bool', NULL, 'count', '2026-01-01T00:00:00Z'),
-       ('animo', 'Animo', 'text', NULL, 'last', '2026-01-01T00:00:00Z'),
-       ('vacia', 'Sin datos', 'number', NULL, 'sum', '2026-01-01T00:00:00Z')`,
+       ('steps', 'Steps', 'number', 'steps', 'sum', '2026-01-01T00:00:00Z'),
+       ('weight', 'Weight', 'number', 'kg', 'avg', '2026-01-01T00:00:00Z'),
+       ('coffee', 'Coffees', 'bool', NULL, 'count', '2026-01-01T00:00:00Z'),
+       ('mood', 'Mood', 'text', NULL, 'last', '2026-01-01T00:00:00Z'),
+       ('empty', 'No data', 'number', NULL, 'sum', '2026-01-01T00:00:00Z')`,
   ).run();
 
   return db;
@@ -27,43 +27,42 @@ function baseTemporal(): Db {
 
 type Observations = Parameters<typeof ingestObservations>[1]['observations'];
 
-const meter = (db: Db, observations: Observations) =>
-  ingestObservations(db, { source: 'fijos', timeZone: TZ, observations });
+const ingest = (db: Db, observations: Observations) =>
+  ingestObservations(db, { source: 'fixtures', timeZone: TZ, observations });
 
 let db: Db;
 beforeEach(() => {
-  db = baseTemporal();
+  db = temporaryDb();
 });
 
 /**
- * Datos fijos alrededor de la semana del lunes 2026-08-31, que es justo el
- * bucket que aparece en el ejemplo de la sección 4.2 del plan.
+ * Fixed data around the week of Monday 2026-08-31.
  *
- *   dom 2026-08-30  -> semana del 2026-08-24
- *   lun 2026-08-31  -> semana del 2026-08-31
- *   mié 2026-09-02  -> semana del 2026-08-31
- *   dom 2026-09-06  -> semana del 2026-08-31   (el domingo cierra la semana)
- *   lun 2026-09-07  -> semana del 2026-09-07
+ *   Sun 2026-08-30 -> week of 2026-08-24
+ *   Mon 2026-08-31 -> week of 2026-08-31
+ *   Wed 2026-09-02 -> week of 2026-08-31
+ *   Sun 2026-09-06 -> week of 2026-08-31   (Sunday closes the week)
+ *   Mon 2026-09-07 -> week of 2026-09-07
  */
-function datosDeSemana(db: Db): void {
-  meter(db, [
-    { series: 'pasos', occurred_at: '2026-08-30T10:00:00Z', value: 1000, external_id: 'p1' },
-    { series: 'pasos', occurred_at: '2026-08-31T10:00:00Z', value: 2000, external_id: 'p2' },
-    { series: 'pasos', occurred_at: '2026-08-31T18:00:00Z', value: 500, external_id: 'p3' },
-    { series: 'pasos', occurred_at: '2026-09-02T10:00:00Z', value: 3000, external_id: 'p4' },
-    { series: 'pasos', occurred_at: '2026-09-06T10:00:00Z', value: 4000, external_id: 'p5' },
-    { series: 'pasos', occurred_at: '2026-09-07T10:00:00Z', value: 9000, external_id: 'p6' },
+function weekFixtures(db: Db): void {
+  ingest(db, [
+    { series: 'steps', occurred_at: '2026-08-30T10:00:00Z', value: 1000, external_id: 's1' },
+    { series: 'steps', occurred_at: '2026-08-31T10:00:00Z', value: 2000, external_id: 's2' },
+    { series: 'steps', occurred_at: '2026-08-31T18:00:00Z', value: 500, external_id: 's3' },
+    { series: 'steps', occurred_at: '2026-09-02T10:00:00Z', value: 3000, external_id: 's4' },
+    { series: 'steps', occurred_at: '2026-09-06T10:00:00Z', value: 4000, external_id: 's5' },
+    { series: 'steps', occurred_at: '2026-09-07T10:00:00Z', value: 9000, external_id: 's6' },
   ]);
 }
 
-describe('bucket day', () => {
-  it('agrupa por local_date y suma dentro del día', () => {
-    datosDeSemana(db);
+describe('day bucket', () => {
+  it('groups by local_date and sums within the day', () => {
+    weekFixtures(db);
 
-    const stats = computeStats(db, { series: 'pasos', bucket: 'day' });
+    const stats = computeStats(db, { series: 'steps', bucket: 'day' });
 
     assert.equal(stats.aggregation, 'sum');
-    assert.equal(stats.unit, 'pasos');
+    assert.equal(stats.unit, 'steps');
     assert.deepEqual(stats.buckets, [
       { date: '2026-08-30', value: 1000, count: 1 },
       { date: '2026-08-31', value: 2500, count: 2 },
@@ -73,184 +72,184 @@ describe('bucket day', () => {
     ]);
   });
 
-  it('el 2026-09-01 no aparece: un bucket sin datos no se inventa', () => {
-    datosDeSemana(db);
+  it('2026-09-01 is absent: an empty bucket is not invented', () => {
+    weekFixtures(db);
 
-    const dias = computeStats(db, { series: 'pasos', bucket: 'day' }).buckets.map((b) => b.date);
-    assert.equal(dias.includes('2026-09-01'), false);
-    assert.equal(dias.includes('2026-09-03'), false);
+    const days = computeStats(db, { series: 'steps', bucket: 'day' }).buckets.map((b) => b.date);
+    assert.equal(days.includes('2026-09-01'), false);
+    assert.equal(days.includes('2026-09-03'), false);
   });
 });
 
-describe('bucket week: la semana empieza en lunes', () => {
-  it('el lunes abre la semana y el domingo la cierra', () => {
-    datosDeSemana(db);
+describe('week bucket: weeks start on Monday', () => {
+  it('Monday opens the week and Sunday closes it', () => {
+    weekFixtures(db);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'week' }).buckets, [
-      // domingo 30 de agosto cae en la semana anterior
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'week' }).buckets, [
+      // Sunday August 30th belongs to the previous week
       { date: '2026-08-24', value: 1000, count: 1 },
-      // lunes 31 + miércoles 2 + domingo 6
+      // Monday 31st + Wednesday 2nd + Sunday 6th
       { date: '2026-08-31', value: 9500, count: 4 },
       { date: '2026-09-07', value: 9000, count: 1 },
     ]);
   });
 
-  it('la fecha del bucket es siempre un lunes', () => {
-    datosDeSemana(db);
+  it('the bucket date is always a Monday', () => {
+    weekFixtures(db);
 
-    for (const bucket of computeStats(db, { series: 'pasos', bucket: 'week' }).buckets) {
-      const dia = new Date(`${bucket.date}T12:00:00Z`).getUTCDay();
-      assert.equal(dia, 1, `${bucket.date} deberia ser lunes`);
+    for (const bucket of computeStats(db, { series: 'steps', bucket: 'week' }).buckets) {
+      assert.equal(new Date(`${bucket.date}T12:00:00Z`).getUTCDay(), 1, `${bucket.date}`);
     }
   });
 
-  it('cruza el año sin romper la semana', () => {
-    // El jueves 2026-01-01 pertenece a la semana del lunes 2025-12-29.
-    meter(db, [
-      { series: 'pasos', occurred_at: '2025-12-30T10:00:00Z', value: 10, external_id: 'a' },
-      { series: 'pasos', occurred_at: '2026-01-01T10:00:00Z', value: 20, external_id: 'b' },
+  it('crosses the year without breaking the week', () => {
+    // Thursday 2026-01-01 belongs to the week of Monday 2025-12-29.
+    ingest(db, [
+      { series: 'steps', occurred_at: '2025-12-30T10:00:00Z', value: 10, external_id: 'a' },
+      { series: 'steps', occurred_at: '2026-01-01T10:00:00Z', value: 20, external_id: 'b' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'week' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'week' }).buckets, [
       { date: '2025-12-29', value: 30, count: 2 },
     ]);
   });
 });
 
-describe('bucket month', () => {
-  it('agrupa por el día 1 del mes', () => {
-    datosDeSemana(db);
+describe('month bucket', () => {
+  it('groups on the first day of the month', () => {
+    weekFixtures(db);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'month' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'month' }).buckets, [
       { date: '2026-08-01', value: 3500, count: 3 },
       { date: '2026-09-01', value: 16000, count: 3 },
     ]);
   });
 });
 
-describe('la agregación sale de la serie, no del cliente', () => {
-  it('avg promedia', () => {
-    meter(db, [
-      { series: 'peso', occurred_at: '2026-09-05T07:00:00Z', value: 74, external_id: 'a' },
-      { series: 'peso', occurred_at: '2026-09-05T20:00:00Z', value: 76, external_id: 'b' },
+describe('the aggregation comes from the series, not from the client', () => {
+  it('avg averages', () => {
+    ingest(db, [
+      { series: 'weight', occurred_at: '2026-09-05T07:00:00Z', value: 74, external_id: 'a' },
+      { series: 'weight', occurred_at: '2026-09-05T20:00:00Z', value: 76, external_id: 'b' },
     ]);
 
-    const stats = computeStats(db, { series: 'peso', bucket: 'day' });
+    const stats = computeStats(db, { series: 'weight', bucket: 'day' });
     assert.equal(stats.aggregation, 'avg');
     assert.equal(stats.unit, 'kg');
     assert.deepEqual(stats.buckets, [{ date: '2026-09-05', value: 75, count: 2 }]);
   });
 
-  it('count cuenta observaciones, no valores', () => {
-    meter(db, [
-      { series: 'cafe', occurred_at: '2026-09-05T08:00:00Z', value: true, external_id: 'a' },
-      { series: 'cafe', occurred_at: '2026-09-05T12:00:00Z', value: false, external_id: 'b' },
-      { series: 'cafe', occurred_at: '2026-09-05T18:00:00Z', value: true, external_id: 'c' },
+  it('count counts observations, not values', () => {
+    ingest(db, [
+      { series: 'coffee', occurred_at: '2026-09-05T08:00:00Z', value: true, external_id: 'a' },
+      { series: 'coffee', occurred_at: '2026-09-05T12:00:00Z', value: false, external_id: 'b' },
+      { series: 'coffee', occurred_at: '2026-09-05T18:00:00Z', value: true, external_id: 'c' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'cafe', bucket: 'day' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'coffee', bucket: 'day' }).buckets, [
       { date: '2026-09-05', value: 3, count: 3 },
     ]);
   });
 
-  it('last se queda con la observación más reciente del bucket', () => {
-    meter(db, [
-      { series: 'animo', occurred_at: '2026-09-05T08:00:00Z', value: 'regular', external_id: 'a' },
-      { series: 'animo', occurred_at: '2026-09-05T21:00:00Z', value: 'bien', external_id: 'b' },
-      { series: 'animo', occurred_at: '2026-09-05T14:00:00Z', value: 'mal', external_id: 'c' },
+  it('last takes the most recent observation of the bucket', () => {
+    ingest(db, [
+      { series: 'mood', occurred_at: '2026-09-05T08:00:00Z', value: 'so-so', external_id: 'a' },
+      { series: 'mood', occurred_at: '2026-09-05T21:00:00Z', value: 'good', external_id: 'b' },
+      { series: 'mood', occurred_at: '2026-09-05T14:00:00Z', value: 'bad', external_id: 'c' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'animo', bucket: 'day' }).buckets, [
-      { date: '2026-09-05', value: 'bien', count: 3 },
+    assert.deepEqual(computeStats(db, { series: 'mood', bucket: 'day' }).buckets, [
+      { date: '2026-09-05', value: 'good', count: 3 },
     ]);
   });
 
-  it('last dentro de un bucket de mes coge la última del mes entero', () => {
-    meter(db, [
-      { series: 'animo', occurred_at: '2026-09-01T08:00:00Z', value: 'primero', external_id: 'a' },
-      { series: 'animo', occurred_at: '2026-09-28T08:00:00Z', value: 'ultimo', external_id: 'b' },
-      { series: 'animo', occurred_at: '2026-09-15T08:00:00Z', value: 'medio', external_id: 'c' },
+  it('last inside a month bucket takes the last of the whole month', () => {
+    ingest(db, [
+      { series: 'mood', occurred_at: '2026-09-01T08:00:00Z', value: 'first', external_id: 'a' },
+      { series: 'mood', occurred_at: '2026-09-28T08:00:00Z', value: 'last', external_id: 'b' },
+      { series: 'mood', occurred_at: '2026-09-15T08:00:00Z', value: 'middle', external_id: 'c' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'animo', bucket: 'month' }).buckets, [
-      { date: '2026-09-01', value: 'ultimo', count: 3 },
+    assert.deepEqual(computeStats(db, { series: 'mood', bucket: 'month' }).buckets, [
+      { date: '2026-09-01', value: 'last', count: 3 },
     ]);
   });
 });
 
-describe('manda la fecha local, no la UTC', () => {
-  it('las 23:30 UTC cuentan en el día siguiente de Madrid', () => {
-    meter(db, [
-      // 23:30 UTC del 5 son las 01:30 del 6 en Madrid.
-      { series: 'pasos', occurred_at: '2026-09-05T23:30:00Z', value: 100, external_id: 'a' },
-      { series: 'pasos', occurred_at: '2026-09-06T10:00:00Z', value: 200, external_id: 'b' },
+describe('the local date rules, not the UTC one', () => {
+  it('23:30 UTC counts towards the next day in Madrid', () => {
+    ingest(db, [
+      // 23:30 UTC on the 5th is 01:30 on the 6th in Madrid.
+      { series: 'steps', occurred_at: '2026-09-05T23:30:00Z', value: 100, external_id: 'a' },
+      { series: 'steps', occurred_at: '2026-09-06T10:00:00Z', value: 200, external_id: 'b' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'day' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'day' }).buckets, [
       { date: '2026-09-06', value: 300, count: 2 },
     ]);
   });
 
-  it('agrupar por UTC daría otro resultado: es justo lo que se evita', () => {
-    meter(db, [
-      { series: 'pasos', occurred_at: '2026-09-05T23:30:00Z', value: 100, external_id: 'a' },
+  it('grouping by UTC would give a different answer, which is the whole point', () => {
+    ingest(db, [
+      { series: 'steps', occurred_at: '2026-09-05T23:30:00Z', value: 100, external_id: 'a' },
     ]);
 
-    const porLocal = computeStats(db, { series: 'pasos', bucket: 'day' }).buckets;
-    const porUtc = db
-      .prepare("SELECT substr(occurred_at, 1, 10) AS date FROM observations")
+    const byLocal = computeStats(db, { series: 'steps', bucket: 'day' }).buckets;
+    const byUtc = db
+      .prepare('SELECT substr(occurred_at, 1, 10) AS date FROM observations')
       .all() as { date: string }[];
 
-    assert.equal(porLocal[0]?.date, '2026-09-06');
-    assert.equal(porUtc[0]?.date, '2026-09-05');
+    assert.equal(byLocal[0]?.date, '2026-09-06');
+    assert.equal(byUtc[0]?.date, '2026-09-05');
   });
 
-  it('la observación cae en la semana del día local, no la del UTC', () => {
-    // Domingo 2026-09-06 a las 23:30 UTC ya es lunes 7 en Madrid, así que
-    // abre la semana siguiente en vez de cerrar la anterior.
-    meter(db, [
-      { series: 'pasos', occurred_at: '2026-09-06T23:30:00Z', value: 100, external_id: 'a' },
+  it('an observation falls in the local day week, not the UTC one', () => {
+    // Sunday 2026-09-06 at 23:30 UTC is already Monday the 7th in Madrid, so it
+    // opens the next week instead of closing the previous one.
+    ingest(db, [
+      { series: 'steps', occurred_at: '2026-09-06T23:30:00Z', value: 100, external_id: 'a' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'week' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'week' }).buckets, [
       { date: '2026-09-07', value: 100, count: 1 },
     ]);
   });
 });
 
-describe('filtros from y to', () => {
-  it('recortan por fecha local, con ambos extremos incluidos', () => {
-    datosDeSemana(db);
-
-    const buckets = computeStats(db, {
-      series: 'pasos',
-      bucket: 'day',
-      from: '2026-08-31',
-      to: '2026-09-02',
-    }).buckets;
-
-    assert.deepEqual(buckets, [
-      { date: '2026-08-31', value: 2500, count: 2 },
-      { date: '2026-09-02', value: 3000, count: 1 },
-    ]);
-  });
-
-  it('un rango sin datos devuelve una lista vacía, no un error', () => {
-    datosDeSemana(db);
+describe('from and to filters', () => {
+  it('trim by local date, with both ends included', () => {
+    weekFixtures(db);
 
     assert.deepEqual(
-      computeStats(db, { series: 'pasos', bucket: 'day', from: '2030-01-01', to: '2030-12-31' })
+      computeStats(db, {
+        series: 'steps',
+        bucket: 'day',
+        from: '2026-08-31',
+        to: '2026-09-02',
+      }).buckets,
+      [
+        { date: '2026-08-31', value: 2500, count: 2 },
+        { date: '2026-09-02', value: 3000, count: 1 },
+      ],
+    );
+  });
+
+  it('a range with no data returns an empty list, not an error', () => {
+    weekFixtures(db);
+
+    assert.deepEqual(
+      computeStats(db, { series: 'steps', bucket: 'day', from: '2030-01-01', to: '2030-12-31' })
         .buckets,
       [],
     );
   });
 
-  it('el recorte es por observación: la semana queda parcial y se ve', () => {
-    datosDeSemana(db);
+  it('trimming happens per observation, so a partial week shows as partial', () => {
+    weekFixtures(db);
 
-    // Desde el miércoles: la semana del 31 pierde el lunes y se queda en 7000.
+    // From Wednesday on: the week of the 31st loses Monday and drops to 7000.
     assert.deepEqual(
-      computeStats(db, { series: 'pasos', bucket: 'week', from: '2026-09-02' }).buckets,
+      computeStats(db, { series: 'steps', bucket: 'week', from: '2026-09-02' }).buckets,
       [
         { date: '2026-08-31', value: 7000, count: 2 },
         { date: '2026-09-07', value: 9000, count: 1 },
@@ -259,44 +258,47 @@ describe('filtros from y to', () => {
   });
 });
 
-describe('casos borde', () => {
-  it('una serie sin observaciones devuelve buckets vacíos con sus metadatos', () => {
-    assert.deepEqual(computeStats(db, { series: 'vacia', bucket: 'day' }), {
-      series: 'vacia',
+describe('edge cases', () => {
+  it('a series with no observations returns empty buckets plus its metadata', () => {
+    assert.deepEqual(computeStats(db, { series: 'empty', bucket: 'day' }), {
+      series: 'empty',
       aggregation: 'sum',
       unit: null,
       buckets: [],
     });
   });
 
-  it('una serie que no existe se distingue de una serie vacía', () => {
-    assert.throws(() => computeStats(db, { series: 'inventada', bucket: 'day' }), SeriesDesconocida);
+  it('a series that does not exist is distinguishable from an empty one', () => {
+    assert.throws(
+      () => computeStats(db, { series: 'invented', bucket: 'day' }),
+      UnknownSeriesError,
+    );
   });
 
-  it('solo agrega la serie pedida', () => {
-    meter(db, [
-      { series: 'pasos', occurred_at: '2026-09-05T10:00:00Z', value: 1000, external_id: 'a' },
-      { series: 'peso', occurred_at: '2026-09-05T10:00:00Z', value: 74, external_id: 'b' },
+  it('only aggregates the requested series', () => {
+    ingest(db, [
+      { series: 'steps', occurred_at: '2026-09-05T10:00:00Z', value: 1000, external_id: 'a' },
+      { series: 'weight', occurred_at: '2026-09-05T10:00:00Z', value: 74, external_id: 'b' },
     ]);
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'day' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'day' }).buckets, [
       { date: '2026-09-05', value: 1000, count: 1 },
     ]);
   });
 
-  it('agrega observaciones de varias fuentes en el mismo bucket', () => {
-    meter(db, [
-      { series: 'pasos', occurred_at: '2026-09-05T10:00:00Z', value: 1000, external_id: 'a' },
+  it('aggregates observations from several sources into the same bucket', () => {
+    ingest(db, [
+      { series: 'steps', occurred_at: '2026-09-05T10:00:00Z', value: 1000, external_id: 'a' },
     ]);
     ingestObservations(db, {
-      source: 'otro',
+      source: 'other',
       timeZone: TZ,
       observations: [
-        { series: 'pasos', occurred_at: '2026-09-05T11:00:00Z', value: 500, external_id: 'a' },
+        { series: 'steps', occurred_at: '2026-09-05T11:00:00Z', value: 500, external_id: 'a' },
       ],
     });
 
-    assert.deepEqual(computeStats(db, { series: 'pasos', bucket: 'day' }).buckets, [
+    assert.deepEqual(computeStats(db, { series: 'steps', bucket: 'day' }).buckets, [
       { date: '2026-09-05', value: 1500, count: 2 },
     ]);
   });

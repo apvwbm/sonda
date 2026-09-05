@@ -1,14 +1,14 @@
-# Lo que no hace falta para construir la imagen. Cuanto menos contexto se manda
-# al daemon, más rápido el build y menos capas se invalidan sin motivo.
+# Everything the image does not need. The smaller the build context, the faster
+# the build and the fewer layers invalidated for no reason.
 
-# Se instalan dentro, para la plataforma correcta: el node_modules del portátil
-# lleva el binario nativo de Windows y rompería la imagen.
+# Installed inside, for the right platform: the laptop's node_modules carries a
+# native binary for the wrong OS and would break the image.
 **/node_modules
 
-# Se compila dentro.
+# Compiled inside.
 dist
 
-# Datos y secretos: nunca en una imagen.
+# Data and secrets never belong in an image.
 data
 .env
 .env.*
@@ -19,13 +19,13 @@ docs
 test
 tsconfig.test.json
 
-# El seed no entra en la imagen: sembrar datos falsos en producción no tiene
-# sentido, y arrastraría src/ detrás.
+# The seed stays out of the image: sowing fake data in production makes no
+# sense, and it would drag src/ along with it.
 scripts/seed.ts
 
 *.md
 Dockerfile
 .dockerignore
 
-# web/ NO se ignora: cuando exista web/dist habrá que añadir su etapa de build
-# al Dockerfile y copiarla a la imagen. Fastify ya la sirve si la encuentra.
+# web/ is deliberately NOT ignored: once web/dist exists, the Dockerfile needs a
+# stage that builds it and copies it in. Fastify already serves it if present.

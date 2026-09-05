@@ -2,8 +2,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Db } from './index.ts';
 
-// Relativo al módulo, nunca al cwd: en la imagen de Docker el proceso arranca
-// desde donde sea, y los .sql viven junto al JS compilado.
+// Resolved against the module, never the cwd: inside the container the process
+// may start from anywhere, and the .sql files ship next to the compiled JS.
 export const MIGRATIONS_DIR = join(import.meta.dirname, 'migrations');
 
 const FILENAME = /^(\d+)_[\w-]+\.sql$/;
@@ -27,9 +27,7 @@ export function readMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
 
     const match = FILENAME.exec(filename);
     if (!match?.[1]) {
-      throw new Error(
-        `Migración con nombre inválido: '${filename}'. Se espera NNN_nombre.sql`,
-      );
+      throw new Error(`Bad migration filename: '${filename}'. Expected NNN_name.sql`);
     }
 
     migrations.push({ version: Number(match[1]), filename });
@@ -37,13 +35,14 @@ export function readMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
 
   migrations.sort((a, b) => a.version - b.version);
 
-  // Sin huecos ni repetidos: dos ramas que numeren 002 a la vez es el fallo
-  // clásico, y si no salta aquí salta con la base ya escrita.
+  // No gaps and no duplicates. Two branches both numbering theirs 002 is the
+  // classic failure, and if it does not blow up here it blows up with the
+  // database already half written.
   migrations.forEach((migration, index) => {
     if (migration.version !== index + 1) {
       throw new Error(
-        `Migraciones mal numeradas: se esperaba la versión ${index + 1} y ` +
-          `'${migration.filename}' es la ${migration.version}`,
+        `Misnumbered migrations: expected version ${index + 1} but ` +
+          `'${migration.filename}' is ${migration.version}`,
       );
     }
   });
@@ -52,9 +51,11 @@ export function readMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
 }
 
 /**
- * Aplica las migraciones que falten según PRAGMA user_version. Cada una va en su
- * transacción junto con el bump de user_version, así que o entra entera o no
- * entra: no existe el estado "migración a medias".
+ * Applies whatever is missing according to PRAGMA user_version.
+ *
+ * Each migration runs in its own transaction together with its user_version
+ * bump, so it either lands whole or not at all: there is no "half-migrated"
+ * state to recover from.
  */
 export function runMigrations(db: Db, dir: string = MIGRATIONS_DIR): MigrationResult {
   const migrations = readMigrations(dir);
@@ -63,8 +64,8 @@ export function runMigrations(db: Db, dir: string = MIGRATIONS_DIR): MigrationRe
 
   if (current > latest) {
     throw new Error(
-      `La base está en la versión ${current} y este binario solo conoce hasta ` +
-        `la ${latest}. Es una base de una versión más nueva de Sonda`,
+      `The database is at version ${current} but this build only knows up to ` +
+        `${latest}. This database was written by a newer version of Sonda`,
     );
   }
 

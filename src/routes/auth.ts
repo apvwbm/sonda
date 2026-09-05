@@ -17,29 +17,27 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   const backoff = new LoginBackoff();
 
   app.post('/api/auth/login', async (request, reply) => {
-    const bloqueo = backoff.check(request.ip);
-    if (bloqueo.bloqueada) {
-      // Se corta antes de mirar la contraseña: si no, el bloqueo no ahorraría
-      // nada y seguiría siendo un oráculo.
-      request.log.warn({ ip: request.ip, retryAfter: bloqueo.retryAfter }, 'login bloqueado');
+    const block = backoff.check(request.ip);
+    if (block.blocked) {
+      // Bail out before looking at the password. Otherwise the block would save
+      // nothing and would still answer as an oracle.
+      request.log.warn({ ip: request.ip, retryAfter: block.retryAfter }, 'login blocked');
       return reply
         .code(429)
-        .header('Retry-After', String(bloqueo.retryAfter))
-        .send({
-          error: `Demasiados intentos fallidos. Reinténtalo en ${bloqueo.retryAfter} s`,
-        });
+        .header('Retry-After', String(block.retryAfter))
+        .send({ error: `Too many failed attempts. Try again in ${block.retryAfter}s` });
     }
 
+    // A malformed body counts as a failed attempt and answers exactly like a
+    // wrong password: the two must not be distinguishable.
     const parsed = loginSchema.safeParse(request.body);
-    // Un cuerpo mal formado cuenta como intento fallido y devuelve lo mismo que
-    // una contraseña incorrecta: no debe poder distinguirse.
-    const acertada =
+    const correct =
       parsed.success && passwordMatches(app.config.SONDA_PASSWORD, parsed.data.password);
 
-    if (!acertada) {
-      const tras = backoff.fail(request.ip);
-      request.log.warn({ ip: request.ip, bloqueada: tras.bloqueada }, 'intento de login fallido');
-      return reply.code(401).send({ error: 'Contraseña incorrecta' });
+    if (!correct) {
+      const after = backoff.fail(request.ip);
+      request.log.warn({ ip: request.ip, blocked: after.blocked }, 'failed login attempt');
+      return reply.code(401).send({ error: 'Wrong password' });
     }
 
     backoff.success(request.ip);
