@@ -1,0 +1,31 @@
+# Lo que no hace falta para construir la imagen. Cuanto menos contexto se manda
+# al daemon, más rápido el build y menos capas se invalidan sin motivo.
+
+# Se instalan dentro, para la plataforma correcta: el node_modules del portátil
+# lleva el binario nativo de Windows y rompería la imagen.
+**/node_modules
+
+# Se compila dentro.
+dist
+
+# Datos y secretos: nunca en una imagen.
+data
+.env
+.env.*
+
+.git
+.gitignore
+docs
+test
+tsconfig.test.json
+
+# El seed no entra en la imagen: sembrar datos falsos en producción no tiene
+# sentido, y arrastraría src/ detrás.
+scripts/seed.ts
+
+*.md
+Dockerfile
+.dockerignore
+
+# web/ NO se ignora: cuando exista web/dist habrá que añadir su etapa de build
+# al Dockerfile y copiarla a la imagen. Fastify ya la sirve si la encuentra.

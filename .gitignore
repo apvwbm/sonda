@@ -1,0 +1,7 @@
+data/
+node_modules/
+.env
+dist/
+
+# Cookies de sesion de las pruebas con curl.
+cookies.txt
