@@ -48,7 +48,15 @@ curl -c cookies.txt -X POST https://apvwbm.com/api/auth/login \
 curl -b cookies.txt "https://apvwbm.com/api/stats?series=weight&bucket=week"
 ```
 
-Anything you create there disappears at the next reseed.
+It runs with `SONDA_PUBLIC_READ=true`, so the reads above also work without
+logging in at all:
+
+```bash
+curl "https://apvwbm.com/api/stats?series=weight&bucket=week"
+```
+
+Anything you create there disappears at the next reseed. How that instance is
+configured is in [Demo instances](#demo-instances).
 
 ---
 
@@ -184,6 +192,11 @@ of another source, and it does not have to remember to say who it is.
 | `GET` | `/api/stats` | cookie | Aggregation by local-date bucket |
 | `GET` | `/api/export` | cookie | The whole `.db`, via `VACUUM INTO` |
 
+The `Auth` column describes a normal instance. A demo instance can relax the
+reads and the two `POST`s with `SONDA_PUBLIC_READ` and `SONDA_PUBLIC_WRITE`;
+`PATCH`, `DELETE` and `/api/export` are never relaxed. See
+[Demo instances](#demo-instances).
+
 Listing series accepts a bearer token because an ingest script needs to know
 which slugs exist before it sends anything. Ingest accepts a cookie too, and
 anything arriving that way is attributed to the `manual` source: manual capture
@@ -303,6 +316,64 @@ converge to the same rows.
 
 ---
 
+## Web interface
+
+One page, in [`web/`](web/), served by Fastify from `web/dist` on the same origin
+as the API. Same origin means no CORS, no base URL to configure and no second
+container.
+
+It does four things:
+
+- lists the series with their value type, unit and aggregation;
+- plots `/api/stats` as a bar chart, with a series selector and a `day` / `week`
+  / `month` bucket selector;
+- records an observation into the selected series with `POST /api/observations`;
+- signs in. A `401` from any request replaces the page with a password field
+  that posts to `/api/auth/login`; getting it right reloads the data;
+- shows what the API said when it refuses. A `400` appears next to the form with
+  the server's own message, and a wrong password (or the login backoff's `429`)
+  appears under the password field.
+
+**There is no session handling in the browser.** Signing in sets the `HttpOnly`
+cookie and the page keeps nothing: no token in `localStorage`, no "remember me",
+no logged-in flag to fall out of sync with the server. The only thing the page
+knows about auth is what the last response said, which is why a `401` from any
+request is enough to show the password field again.
+
+**Astro with Tailwind v4, static output, and that is the whole stack.** No
+adapter, no client router, no CDN, no chart library. The chart is hand-written
+SVG, which for bars is a `<rect>` per bucket and some arithmetic — a dependency
+would be more code to read, not less.
+
+Two details it gets right rather than approximately:
+
+- **Bucket dates are never parsed into a `Date`.** `new Date('2026-09-04')` is
+  UTC midnight, which renders as the 3rd anywhere west of Greenwich. The server
+  already decided which local day a row belongs to; re-deriving it in the
+  browser is only a chance to disagree with it.
+- **A bucket that aggregated to exactly zero draws no bar**, while a very small
+  value still draws one pixel. Same principle as the API not inventing empty
+  buckets: zero is a result, and it should not look like a near miss.
+
+A text series aggregated with `last` returns strings, not numbers. Those are
+listed rather than plotted, because bars would imply an order they do not have.
+
+### Building it
+
+```bash
+cd web
+npm ci
+npm run build     # -> web/dist
+npm run dev       # Astro dev server, for working on the page itself
+npm run check     # typechecks the page, including the script
+```
+
+`web/dist` is not committed. Fastify serves it when the directory exists and
+logs `API only` when it does not, so the API runs perfectly well without ever
+building the page. The Docker image builds it in its own stage.
+
+---
+
 ## Configuration
 
 Everything is read from the environment at start, never baked into the image, so
@@ -315,9 +386,79 @@ the same image works on any port.
 | `SONDA_TZ` | `Europe/Madrid` | Zone used to compute `local_date` |
 | `SONDA_PASSWORD` | — | Interface password. **Required** |
 | `SONDA_SESSION_SECRET` | — | Cookie signing key. Generated and stored in `SONDA_DATA_DIR` when unset |
+| `SONDA_PUBLIC_READ` | `false` | **Demo instances only.** Opens the three read endpoints to anyone. See [Demo instances](#demo-instances) |
+| `SONDA_PUBLIC_WRITE` | `false` | **Demo instances only.** Opens `POST /api/series` and `POST /api/observations` to anyone |
 
 An invalid value stops the server at startup with a readable message rather than
-failing later. An unknown `SONDA_TZ` is rejected on the spot.
+failing later. An unknown `SONDA_TZ` is rejected on the spot. The two booleans
+accept `true`, `false`, `1` or `0` and nothing else: a `SONDA_PUBLIC_READ=yes`
+stops the server instead of being read as truthy, because the failure mode of
+guessing here is publishing the data.
+
+---
+
+## Demo instances
+
+A demo instance is a **throwaway** instance holding data nobody minds publishing:
+the synthetic set from `scripts/seed.ts`, wiped and rebuilt every night. Two
+flags exist for that case and no other.
+
+| Flag | What it opens |
+|---|---|
+| `SONDA_PUBLIC_READ` | `GET /api/series`, `GET /api/observations`, `GET /api/stats` answer without a cookie |
+| `SONDA_PUBLIC_WRITE` | `POST /api/series` and `POST /api/observations` accept requests without a credential |
+
+**Neither flag opens `PATCH`, `DELETE` or `GET /api/export`.** Those keep their
+guard whatever the environment says, so the worst an anonymous visitor can do to
+a fully public instance is add rows: never rewrite one, never delete one, and
+never walk off with the database file.
+
+Anonymous writes are stored under the source `public`, so they stay
+distinguishable from everything else and a sweep is one statement:
+
+```sql
+DELETE FROM observations WHERE source = 'public';
+```
+
+A real credential still wins. A token ingesting into a public instance keeps
+being attributed to its own source rather than being flattened to `public`.
+
+Both flags are off unless set, and both accept only `true`, `false`, `1` or `0`.
+With either on, the server prints a boxed warning immediately before the
+listening line, so an instance left open by accident shows up in the first
+screen of `journalctl`.
+
+> **Do not turn either flag on where the data is real.** `SONDA_PUBLIC_READ`
+> publishes it. `SONDA_PUBLIC_WRITE` also turns the instance into an open
+> mailbox: anyone who can reach the port can fill the database, and nothing
+> rate-limits them. The reason it is tolerable on the demo is that everything
+> there is thrown away at 04:00 every night.
+
+### The nightly reseed
+
+[`deploy/sonda-seed.service`](deploy/sonda-seed.service) and
+[`deploy/sonda-seed.timer`](deploy/sonda-seed.timer) run the seed with `--reset`
+at 04:00 local time and restart `sonda.service` afterwards. Every path in them
+is an example; adjust `User`, `WorkingDirectory`, `EnvironmentFile` and
+`ReadWritePaths` to your install.
+
+```bash
+sudo cp deploy/sonda-seed.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sonda-seed.timer
+
+sudo systemctl start sonda-seed.service   # run it once by hand first
+systemctl list-timers sonda-seed.timer
+journalctl -u sonda-seed.service -n 50
+```
+
+`--reset` deletes **every series and every observation** before recreating the
+synthetic set. Ingest tokens survive it. The timer is `Persistent=true`, so a
+machine that was off at 04:00 reseeds on its next boot rather than serving stale
+data for a day.
+
+The seed runs from a checkout, not from the image: `scripts/` is deliberately
+excluded from the Docker build, and so is `deploy/`.
 
 ---
 
@@ -384,6 +525,11 @@ five minutes, and a blocked request is rejected before the password is even
 looked at, so the block is not an oracle. It is in memory, so a restart clears
 it — it is a brake, not a WAF.
 
+**Two flags can open an instance up**, and only for demo use:
+`SONDA_PUBLIC_READ` and `SONDA_PUBLIC_WRITE`. Both are off unless set, both
+refuse to be set to anything but `true`/`false`/`1`/`0`, and neither one ever
+opens `PATCH`, `DELETE` or `/api/export`. See [Demo instances](#demo-instances).
+
 ### Logout does not revoke server-side
 
 The session is a signed cookie carrying its own expiry, with no sessions table.
@@ -440,6 +586,9 @@ npm run seed       # ~90 days of reproducible fake data
 npm run token      # mint an ingest token
 ```
 
+`web/` is a separate npm project with its own lockfile, so the frontend's
+dependencies never enter the server's tree. See [Web interface](#web-interface).
+
 Tests use `node:test`, the runner Node already ships. No framework, and the
 database is in memory, so the suite leaves nothing behind.
 
@@ -449,6 +598,7 @@ being a single file.
 `npm run seed -- --reset` deletes every series and observation and recreates the
 seed, leaving tokens alone. That is what a demo instance runs on a timer: the
 90-day window follows the calendar and whatever visitors created gets cleared.
+The systemd units that do it live in [`deploy/`](deploy/).
 
 ### Migrations
 

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { requireSession } from '../auth/session.ts';
+import { allowPublicRead, requireSession } from '../auth/session.ts';
 import type { Db } from '../db/index.ts';
 import type { Aggregation, Bucket } from '../lib/schemas.ts';
 import { formatZodError, statsQuerySchema } from '../lib/schemas.ts';
@@ -126,7 +126,7 @@ export function computeStats(db: Db, query: StatsQuery): StatsResult {
 }
 
 export async function statsRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/stats', { preHandler: requireSession }, async (request, reply) => {
+  app.get('/api/stats', { preHandler: allowPublicRead(requireSession) }, async (request, reply) => {
     const parsed = statsQuerySchema.safeParse(request.query);
     if (!parsed.success) {
       return reply.code(400).send({ error: formatZodError(parsed.error) });

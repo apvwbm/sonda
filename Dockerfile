@@ -1,7 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # UNVERIFIED: written without Docker available on the development machine.
-# Neither the build nor the run has ever been executed.
+# Neither the build nor the run has ever been executed. The web stage mirrors a
+# `npm ci && npm run build` in web/ that does run clean locally.
 
 # --------------------------------------------------------------------- build
 FROM node:22-alpine AS build
@@ -30,6 +31,24 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 
+# ----------------------------------------------------------------- web build
+# web/ is its own npm project with its own lockfile, so it gets its own stage:
+# Astro and Tailwind never reach the runtime image, and touching src/ does not
+# invalidate the frontend build or the other way round.
+FROM node:22-alpine AS web
+
+WORKDIR /web
+
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+
+COPY web/astro.config.mjs web/tsconfig.json ./
+COPY web/src ./src
+
+# Static output, no adapter: the result is plain files in /web/dist.
+RUN npm run build
+
+
 # ------------------------------------------------------------- runtime image
 FROM node:22-alpine AS runtime
 
@@ -43,6 +62,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 # GET /api/health reads the version from here; it is the single source.
 COPY package.json ./
+
+# src/index.ts resolves this against its own directory, not the cwd:
+# /app/dist/index.js -> /app/web/dist. Fastify serves it when it exists, and
+# says 'API only' when it does not.
+COPY --from=web /web/dist ./web/dist
 
 # No src/ and no scripts/: minting a token inside the container is done with
 # dist/cli.js, which does ship compiled. The seed is left out on purpose.

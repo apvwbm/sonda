@@ -88,6 +88,34 @@ async function main(): Promise<void> {
     process.once(signal, shutdown);
   }
 
+  // Loud on purpose, and the last thing before the listening line: an instance
+  // left open by accident should be obvious in the first screen of logs.
+  if (config.SONDA_PUBLIC_READ || config.SONDA_PUBLIC_WRITE) {
+    const rule = '='.repeat(78);
+    const lines = [rule];
+
+    if (config.SONDA_PUBLIC_READ) {
+      lines.push(
+        'SONDA_PUBLIC_READ IS ON. Anyone who can reach this port can read the data.',
+        '  open: GET /api/series, GET /api/observations, GET /api/stats',
+      );
+    }
+    if (config.SONDA_PUBLIC_WRITE) {
+      lines.push(
+        'SONDA_PUBLIC_WRITE IS ON. Anyone who can reach this port can add data.',
+        "  open: POST /api/series, POST /api/observations (stored as source 'public')",
+      );
+    }
+
+    lines.push(
+      'Always authenticated: PATCH, DELETE and GET /api/export.',
+      'These flags are for throwaway demo instances. Never where the data is real.',
+      rule,
+    );
+
+    for (const line of lines) app.log.warn(line);
+  }
+
   // 0.0.0.0 so the port stays reachable from outside a container.
   await app.listen({ port: config.SONDA_PORT, host: '0.0.0.0' });
 }

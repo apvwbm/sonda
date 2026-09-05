@@ -1,0 +1,46 @@
+# Reseeds a Sonda demo instance from scratch, then restarts the service.
+#
+# Only for a throwaway demo: --reset deletes every series and every observation
+# before recreating the synthetic set. Never install this next to real data.
+#
+# All paths below are examples. Adjust them to your install, then:
+#
+#   sudo cp deploy/sonda-seed.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now sonda-seed.timer
+#   sudo systemctl start sonda-seed.service     # run it once by hand to check
+#   journalctl -u sonda-seed.service -n 50
+
+[Unit]
+Description=Reseed the Sonda demo instance with synthetic data
+Documentation=https://github.com/apvwbm/sonda#demo-instances
+# Only meaningful once the service it reseeds exists.
+After=sonda.service
+
+[Service]
+Type=oneshot
+
+# The seed opens the database file directly, so it needs the same user and the
+# same SONDA_DATA_DIR the service runs with, or it will seed a different file.
+User=sonda
+Group=sonda
+WorkingDirectory=/opt/sonda
+EnvironmentFile=/opt/sonda/.env
+
+# scripts/ is deliberately not in the Docker image, so the seed runs from a
+# checkout. Node 22.18+ runs the .ts file directly, with no build step.
+ExecStart=/usr/bin/node /opt/sonda/scripts/seed.ts --reset
+
+# The rows changed underneath a running server. Restarting is not strictly
+# required — both processes are just SQLite connections to one file — but it
+# leaves the demo in a known state and costs a second.
+ExecStartPost=/usr/bin/systemctl restart sonda.service
+
+# A reseed that fails should be visible in the timer's status, not silent.
+TimeoutStartSec=5min
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/sonda/data

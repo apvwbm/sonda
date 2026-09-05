@@ -14,6 +14,36 @@ a backup.
 
 Nothing yet.
 
+## [0.2.0] - 2026-09-05
+
+Schema version: **1** (unchanged).
+
+### Added
+
+- `SONDA_PUBLIC_READ`, off by default. With it on, `GET /api/series`,
+  `GET /api/observations` and `GET /api/stats` answer without a session cookie.
+- `SONDA_PUBLIC_WRITE`, off by default. With it on, `POST /api/series` and
+  `POST /api/observations` accept requests without a credential, and anonymous
+  rows are stored under the source `public`.
+- A boxed warning at startup whenever either flag is on.
+- `web/`: a one-page interface in Astro with Tailwind v4, static output to
+  `web/dist`, served by Fastify on the same origin. Lists the series, plots
+  `/api/stats` as a hand-written SVG bar chart with series and bucket
+  selectors, records an observation through `POST /api/observations`, and signs
+  in with a password field that posts to `/api/auth/login`. No adapter, no
+  client router, no CDN, no chart library, and no session state in the browser:
+  the `HttpOnly` cookie is the whole session.
+- A Dockerfile stage that builds `web/` and copies `web/dist` into the image.
+- `deploy/sonda-seed.service` and `deploy/sonda-seed.timer`: a nightly 04:00
+  reseed with `--reset` that restarts `sonda.service` afterwards.
+
+Both flags exist for throwaway demo instances. Neither opens `PATCH`, `DELETE`
+or `GET /api/export`, which keep their guard under every configuration.
+
+## [0.1.1] - 2026-09-05
+
+Version bump only, to put the tagging on a proper footing. No code changes.
+
 ## [0.1.0] - 2026-09-05
 
 Schema version: **1** (runs `001_init.sql`).
@@ -42,5 +72,7 @@ releases.
 - Dockerfile and `.dockerignore`. **Not yet verified**: no Docker build has been
   run against them.
 
-[Unreleased]: https://github.com/apvwbm/sonda/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/apvwbm/sonda/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/apvwbm/sonda/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/apvwbm/sonda/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/apvwbm/sonda/releases/tag/v0.1.0

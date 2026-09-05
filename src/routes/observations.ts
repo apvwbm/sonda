@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { requireSession, requireSessionOrBearer } from '../auth/session.ts';
+import {
+  allowPublicRead,
+  allowPublicWrite,
+  requireSession,
+  requireSessionOrBearer,
+} from '../auth/session.ts';
 import type { Db } from '../db/index.ts';
 import { toLocalDate } from '../lib/localdate.ts';
 import type { ObservationInput, ValueType } from '../lib/schemas.ts';
@@ -180,101 +185,109 @@ function decodeCursor(cursor: string): { occurred_at: string; id: number } | nul
 export async function observationsRoutes(app: FastifyInstance): Promise<void> {
   const { db } = app;
 
-  app.post('/api/observations', { preHandler: requireSessionOrBearer }, async (request, reply) => {
-    const auth = request.auth;
-    if (!auth) {
-      // Unreachable while the preHandler is in place. If it ever falls off the
-      // route, fail closed instead of inserting with an undefined source.
-      return reply.code(401).send({ error: 'Authentication required' });
-    }
-
-    const parsed = ingestSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: formatZodError(parsed.error) });
-    }
-
-    try {
-      return ingestObservations(db, {
-        source: auth.source,
-        timeZone: app.config.SONDA_TZ,
-        observations: parsed.data.observations,
-      });
-    } catch (error) {
-      if (error instanceof IngestValidationError) {
-        return reply.code(400).send({ error: error.message });
+  app.post(
+    '/api/observations',
+    { preHandler: allowPublicWrite(requireSessionOrBearer) },
+    async (request, reply) => {
+      const auth = request.auth;
+      if (!auth) {
+        // Unreachable while the preHandler is in place. If it ever falls off the
+        // route, fail closed instead of inserting with an undefined source.
+        return reply.code(401).send({ error: 'Authentication required' });
       }
-      throw error;
-    }
-  });
 
-  app.get('/api/observations', { preHandler: requireSession }, async (request, reply) => {
-    const parsed = listObservationsQuerySchema.safeParse(request.query);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: formatZodError(parsed.error) });
-    }
-    const { series, from, to, limit, cursor } = parsed.data;
-
-    const filters: string[] = [];
-    // One extra row is requested purely to find out whether a next page exists.
-    const params: Record<string, unknown> = { limit: limit + 1 };
-
-    if (series !== undefined) {
-      const target = db.prepare('SELECT id FROM series WHERE slug = ?').get(series) as
-        | { id: number }
-        | undefined;
-      if (!target) {
-        return reply.code(404).send({ error: `Series '${series}' does not exist` });
+      const parsed = ingestSchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: formatZodError(parsed.error) });
       }
-      filters.push('o.series_id = @series_id');
-      params['series_id'] = target.id;
-    }
 
-    // from and to filter on local_date, exactly like /api/stats: asking for
-    // 'the 1st to the 5th of September' is a question about local days.
-    if (from !== undefined) {
-      filters.push('o.local_date >= @from');
-      params['from'] = from;
-    }
-    if (to !== undefined) {
-      filters.push('o.local_date <= @to');
-      params['to'] = to;
-    }
-
-    if (cursor !== undefined) {
-      const position = decodeCursor(cursor);
-      if (!position) {
-        return reply.code(400).send({ error: 'Invalid cursor' });
+      try {
+        return ingestObservations(db, {
+          source: auth.source,
+          timeZone: app.config.SONDA_TZ,
+          observations: parsed.data.observations,
+        });
+      } catch (error) {
+        if (error instanceof IngestValidationError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
       }
-      // Row-value comparison, matching the descending (occurred_at, id) order.
-      filters.push('(o.occurred_at, o.id) < (@cursor_at, @cursor_id)');
-      params['cursor_at'] = position.occurred_at;
-      params['cursor_id'] = position.id;
-    }
+    },
+  );
 
-    const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+  app.get(
+    '/api/observations',
+    { preHandler: allowPublicRead(requireSession) },
+    async (request, reply) => {
+      const parsed = listObservationsQuerySchema.safeParse(request.query);
+      if (!parsed.success) {
+        return reply.code(400).send({ error: formatZodError(parsed.error) });
+      }
+      const { series, from, to, limit, cursor } = parsed.data;
 
-    const rows = db
-      .prepare(
-        `SELECT o.id, s.slug AS series, o.occurred_at, o.local_date,
-                CASE WHEN o.value_num IS NOT NULL THEN o.value_num ELSE o.value_text END AS value,
-                o.source, o.external_id, o.created_at
-         FROM observations o
-         JOIN series s ON s.id = o.series_id
-         ${where}
-         ORDER BY o.occurred_at DESC, o.id DESC
-         LIMIT @limit`,
-      )
-      .all(params) as ObservationRow[];
+      const filters: string[] = [];
+      // One extra row is requested purely to find out whether a next page exists.
+      const params: Record<string, unknown> = { limit: limit + 1 };
 
-    const hasMore = rows.length > limit;
-    const observations = hasMore ? rows.slice(0, limit) : rows;
-    const last = observations.at(-1);
+      if (series !== undefined) {
+        const target = db.prepare('SELECT id FROM series WHERE slug = ?').get(series) as
+          | { id: number }
+          | undefined;
+        if (!target) {
+          return reply.code(404).send({ error: `Series '${series}' does not exist` });
+        }
+        filters.push('o.series_id = @series_id');
+        params['series_id'] = target.id;
+      }
 
-    return {
-      observations,
-      next_cursor: hasMore && last ? encodeCursor(last) : null,
-    };
-  });
+      // from and to filter on local_date, exactly like /api/stats: asking for
+      // 'the 1st to the 5th of September' is a question about local days.
+      if (from !== undefined) {
+        filters.push('o.local_date >= @from');
+        params['from'] = from;
+      }
+      if (to !== undefined) {
+        filters.push('o.local_date <= @to');
+        params['to'] = to;
+      }
+
+      if (cursor !== undefined) {
+        const position = decodeCursor(cursor);
+        if (!position) {
+          return reply.code(400).send({ error: 'Invalid cursor' });
+        }
+        // Row-value comparison, matching the descending (occurred_at, id) order.
+        filters.push('(o.occurred_at, o.id) < (@cursor_at, @cursor_id)');
+        params['cursor_at'] = position.occurred_at;
+        params['cursor_id'] = position.id;
+      }
+
+      const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
+
+      const rows = db
+        .prepare(
+          `SELECT o.id, s.slug AS series, o.occurred_at, o.local_date,
+                  CASE WHEN o.value_num IS NOT NULL THEN o.value_num ELSE o.value_text END AS value,
+                  o.source, o.external_id, o.created_at
+           FROM observations o
+           JOIN series s ON s.id = o.series_id
+           ${where}
+           ORDER BY o.occurred_at DESC, o.id DESC
+           LIMIT @limit`,
+        )
+        .all(params) as ObservationRow[];
+
+      const hasMore = rows.length > limit;
+      const observations = hasMore ? rows.slice(0, limit) : rows;
+      const last = observations.at(-1);
+
+      return {
+        observations,
+        next_cursor: hasMore && last ? encodeCursor(last) : null,
+      };
+    },
+  );
 
   app.delete('/api/observations/:id', { preHandler: requireSession }, async (request, reply) => {
     const params = idParamSchema.safeParse(request.params);

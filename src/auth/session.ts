@@ -21,8 +21,17 @@ export const SECRET_FILENAME = 'session-secret';
 /** The source attributed to anything ingested with a cookie rather than a token. */
 export const SOURCE_MANUAL = 'manual';
 
+/**
+ * The source attributed to an unauthenticated write under SONDA_PUBLIC_WRITE.
+ *
+ * Giving it a source of its own rather than reusing 'manual' keeps anonymous
+ * rows identifiable, so a demo instance can sweep them with a single
+ * DELETE ... WHERE source = 'public'.
+ */
+export const SOURCE_PUBLIC = 'public';
+
 export interface RequestAuth {
-  kind: 'session' | 'token';
+  kind: 'session' | 'token' | 'public';
   source: string;
 }
 
@@ -116,6 +125,59 @@ function hasValidSession(request: FastifyRequest): boolean {
   return verifySessionValue(request.server.sessionSecret, request.cookies[SESSION_COOKIE]);
 }
 
+type PreHandler = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+
+/** Who the request is, or undefined. Answers without touching the reply. */
+function identify(request: FastifyRequest): RequestAuth | undefined {
+  if (hasValidSession(request)) {
+    return { kind: 'session', source: SOURCE_MANUAL };
+  }
+
+  const identity = authenticateBearer(request.server.db, request.headers.authorization);
+  if (identity) {
+    return { kind: 'token', source: identity.source };
+  }
+
+  return undefined;
+}
+
+/**
+ * Wraps a preHandler so that, with SONDA_PUBLIC_READ on, the request passes
+ * without any credentials.
+ *
+ * Only the three read endpoints are wrapped. request.auth stays undefined on a
+ * public read, which is the truth: nobody was identified, and no read handler
+ * looks at it.
+ */
+export function allowPublicRead(guard: PreHandler): PreHandler {
+  return async function publicReadGuard(request, reply) {
+    if (request.server.config.SONDA_PUBLIC_READ) return;
+    await guard(request, reply);
+  };
+}
+
+/**
+ * Wraps a preHandler so that, with SONDA_PUBLIC_WRITE on, an anonymous request
+ * is let through as the 'public' source.
+ *
+ * Only the two creating endpoints are wrapped. DELETE, PATCH and /api/export
+ * keep their guard under every flag, so the worst an anonymous visitor can do
+ * is add rows, never remove or rewrite what is already there, and never walk
+ * off with the database file.
+ *
+ * A real credential still wins, so token ingest into a public instance stays
+ * attributed to its own source instead of being flattened to 'public'.
+ */
+export function allowPublicWrite(guard: PreHandler): PreHandler {
+  return async function publicWriteGuard(request, reply) {
+    if (!request.server.config.SONDA_PUBLIC_WRITE) {
+      await guard(request, reply);
+      return;
+    }
+    request.auth = identify(request) ?? { kind: 'public', source: SOURCE_PUBLIC };
+  };
+}
+
 /** preHandler for everything the endpoint table marks as 'cookie'. */
 export async function requireSession(
   request: FastifyRequest,
@@ -138,14 +200,9 @@ export async function requireSessionOrBearer(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  if (hasValidSession(request)) {
-    request.auth = { kind: 'session', source: SOURCE_MANUAL };
-    return;
-  }
-
-  const identity = authenticateBearer(request.server.db, request.headers.authorization);
+  const identity = identify(request);
   if (identity) {
-    request.auth = { kind: 'token', source: identity.source };
+    request.auth = identity;
     return;
   }
 

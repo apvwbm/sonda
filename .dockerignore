@@ -19,6 +19,9 @@ docs
 test
 tsconfig.test.json
 
+# Host-side systemd units. They configure the machine, not the container.
+deploy
+
 # The seed stays out of the image: sowing fake data in production makes no
 # sense, and it would drag src/ along with it.
 scripts/seed.ts
@@ -27,5 +30,8 @@ scripts/seed.ts
 Dockerfile
 .dockerignore
 
-# web/ is deliberately NOT ignored: once web/dist exists, the Dockerfile needs a
-# stage that builds it and copies it in. Fastify already serves it if present.
+# web/ sources are NOT ignored: the web stage builds them. Its output and cache
+# are rebuilt inside, and a locally built web/dist would only be copied in to be
+# thrown away. `dist` above only matches the top level, so these are explicit.
+web/dist
+web/.astro

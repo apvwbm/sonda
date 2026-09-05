@@ -1,0 +1,25 @@
+# Fires sonda-seed.service every night at 04:00 local time.
+#
+# The unit name is what pairs them: sonda-seed.timer looks for a service of the
+# same name, so there is no Unit= line to keep in sync.
+#
+#   sudo systemctl enable --now sonda-seed.timer
+#   systemctl list-timers sonda-seed.timer     # next and last run
+
+[Unit]
+Description=Daily reseed of the Sonda demo instance
+
+[Timer]
+# Local time, so it follows the machine's zone rather than UTC.
+OnCalendar=*-*-* 04:00:00
+
+# Run the reseed on the next boot if the machine was off at 04:00, instead of
+# silently skipping a day and leaving the demo showing stale data.
+Persistent=true
+
+# Nothing depends on the demo being punctual, and the jitter keeps the reseed
+# off the same second as every other 04:00 job on the host.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

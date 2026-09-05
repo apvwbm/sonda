@@ -165,6 +165,8 @@ Con defaults que funcionan sin tocar nada.
 | `SONDA_TZ` | `Europe/Madrid` | Zona con la que se calcula `local_date` |
 | `SONDA_PASSWORD` | — | Contraseña de la interfaz. Obligatoria |
 | `SONDA_SESSION_SECRET` | — | Firma de la cookie. Se genera sola si falta y se guarda en `SONDA_DATA_DIR` |
+| `SONDA_PUBLIC_READ` | `false` | Solo para instancias de demo: abre los tres GET de lectura sin cookie |
+| `SONDA_PUBLIC_WRITE` | `false` | Solo para instancias de demo: abre `POST /api/series` y `POST /api/observations` sin credencial |
 
 ---
 

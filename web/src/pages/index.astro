@@ -1,0 +1,640 @@
+---
+import '../styles/global.css';
+
+const BUCKETS = [
+  { value: 'day', label: 'Day' },
+  { value: 'week', label: 'Week' },
+  { value: 'month', label: 'Month' },
+];
+---
+
+<html lang="en" class="h-full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sonda</title>
+    <meta name="description" content="Self-hosted store and API for personal data." />
+  </head>
+
+  <body
+    class="min-h-full bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100"
+  >
+    <div class="mx-auto max-w-5xl px-5 py-10 sm:px-8">
+      <header class="mb-8">
+        <h1 class="text-2xl font-semibold tracking-tight">Sonda</h1>
+        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+          Your data, on your machine, behind an API you own.
+        </p>
+      </header>
+
+      <!-- Only ever shown for a 401: without a session nothing else on the page
+           can work, so it replaces the sections rather than sitting above them. -->
+      <div
+        id="login"
+        hidden
+        class="max-w-md rounded-lg border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900"
+      >
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">Sign in</h2>
+        <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">
+          The API asked for a session. Signing in sets the cookie; this page keeps nothing of its
+          own.
+        </p>
+
+        <form id="login-form" class="mt-4 flex flex-wrap items-center gap-2">
+          <label class="sr-only" for="login-password">Password</label>
+          <input
+            id="login-password"
+            type="password"
+            required
+            autocomplete="current-password"
+            placeholder="Password"
+            class="min-w-0 grow rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-slate-700"
+          />
+          <button
+            id="login-submit"
+            type="submit"
+            class="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white dark:focus:ring-offset-slate-900"
+          >
+            Sign in
+          </button>
+        </form>
+
+        <div id="login-error" hidden class="mt-3"></div>
+      </div>
+
+      <div id="content" class="space-y-10">
+        <!-- ------------------------------------------------------- series -->
+        <section>
+          <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Series</h2>
+
+          <div
+            class="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
+          >
+            <p id="series-empty" hidden class="p-6 text-sm text-slate-500 dark:text-slate-400">
+              No series yet. Create one with <code class="font-mono">POST /api/series</code> and
+              reload.
+            </p>
+
+            <table id="series-table" hidden class="w-full text-sm">
+              <thead
+                class="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500 dark:border-slate-800"
+              >
+                <tr>
+                  <th class="px-4 py-2.5 font-medium">Slug</th>
+                  <th class="px-4 py-2.5 font-medium">Name</th>
+                  <th class="px-4 py-2.5 font-medium">Type</th>
+                  <th class="px-4 py-2.5 font-medium">Unit</th>
+                  <th class="px-4 py-2.5 font-medium">Aggregation</th>
+                </tr>
+              </thead>
+              <tbody id="series-rows" class="divide-y divide-slate-100 dark:divide-slate-800"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- -------------------------------------------------------- chart -->
+        <section>
+          <div class="mb-3 flex flex-wrap items-end justify-between gap-3">
+            <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-500">Stats</h2>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <label class="sr-only" for="series-select">Series</label>
+              <select
+                id="series-select"
+                class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-slate-700"
+              ></select>
+
+              <label class="sr-only" for="bucket-select">Bucket</label>
+              <select
+                id="bucket-select"
+                class="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-slate-700"
+              >
+                {BUCKETS.map((b) => <option value={b.value}>{b.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div
+            class="rounded-lg border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
+          >
+            <p id="chart-caption" class="mb-4 text-sm text-slate-500 dark:text-slate-400"></p>
+            <div id="chart-error" hidden class="mb-4"></div>
+            <div id="chart"></div>
+          </div>
+        </section>
+
+        <!-- --------------------------------------------------------- form -->
+        <section>
+          <h2 class="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+            Record an observation
+          </h2>
+
+          <form
+            id="entry-form"
+            class="rounded-lg border border-slate-200 bg-white p-5 dark:border-slate-800 dark:bg-slate-900"
+          >
+            <div class="grid gap-4 sm:grid-cols-3">
+              <div>
+                <label
+                  class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-400"
+                  for="entry-series">Series</label
+                >
+                <input
+                  id="entry-series"
+                  readonly
+                  tabindex="-1"
+                  aria-describedby="entry-series-hint"
+                  class="w-full cursor-default rounded-md border border-slate-200 bg-slate-100 px-3 py-1.5 font-mono text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-300"
+                />
+                <p id="entry-series-hint" class="mt-1 text-xs text-slate-400">
+                  Follows the selector above.
+                </p>
+              </div>
+
+              <div>
+                <label
+                  class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-400"
+                  for="entry-value">Value</label
+                >
+                <!-- Replaced from script: the control depends on value_type. -->
+                <div id="entry-value-slot"></div>
+              </div>
+
+              <div>
+                <label
+                  class="mb-1.5 block text-xs font-medium text-slate-600 dark:text-slate-400"
+                  for="entry-when">When</label
+                >
+                <input
+                  id="entry-when"
+                  type="datetime-local"
+                  required
+                  class="w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-slate-700"
+                />
+                <p class="mt-1 text-xs text-slate-400">Local time. Sent as a UTC instant.</p>
+              </div>
+            </div>
+
+            <div id="entry-message" hidden class="mt-4"></div>
+
+            <div class="mt-5 flex items-center gap-3">
+              <button
+                id="entry-submit"
+                type="submit"
+                class="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white dark:focus:ring-offset-slate-900"
+              >
+                Record
+              </button>
+              <span class="text-xs text-slate-400">
+                <code class="font-mono">POST /api/observations</code>
+              </span>
+            </div>
+          </form>
+        </section>
+      </div>
+
+      <footer class="mt-12 text-xs text-slate-400">
+        Served by Fastify from <code class="font-mono">web/dist</code>. Same origin as the API, so
+        there is no CORS and no base URL to configure.
+      </footer>
+    </div>
+
+    <script>
+      // ------------------------------------------------------------- types
+
+      type ValueType = 'bool' | 'number' | 'duration' | 'text';
+
+      interface Series {
+        id: number;
+        slug: string;
+        name: string;
+        value_type: ValueType;
+        unit: string | null;
+        aggregation: string;
+        archived_at: string | null;
+      }
+
+      interface StatsBucket {
+        date: string;
+        value: number | string | null;
+        count: number;
+      }
+
+      interface Stats {
+        series: string;
+        aggregation: string;
+        unit: string | null;
+        buckets: StatsBucket[];
+      }
+
+      // ---------------------------------------------------------------- api
+
+      /** Carries the status so 401 can be told apart from 400 without parsing text. */
+      class ApiError extends Error {
+        status: number;
+        constructor(status: number, message: string) {
+          super(message);
+          this.status = status;
+        }
+      }
+
+      async function api<T>(path: string, init?: RequestInit): Promise<T> {
+        const response = await fetch(path, {
+          credentials: 'same-origin',
+          headers: init?.body ? { 'Content-Type': 'application/json' } : undefined,
+          ...init,
+        });
+
+        // Every error in this API is { "error": "..." }, but a proxy in front of
+        // it can still answer with HTML, so parsing is allowed to fail.
+        let body: unknown = null;
+        try {
+          body = await response.json();
+        } catch {
+          body = null;
+        }
+
+        if (!response.ok) {
+          const message =
+            body && typeof body === 'object' && 'error' in body
+              ? String((body as { error: unknown }).error)
+              : `${response.status} ${response.statusText}`;
+          throw new ApiError(response.status, message);
+        }
+
+        return body as T;
+      }
+
+      // ------------------------------------------------------------- helpers
+
+      const $ = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
+
+      const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+      /**
+       * Formats a 'YYYY-MM-DD' bucket without going through Date.
+       *
+       * new Date('2026-09-04') parses as UTC midnight, which renders as the 3rd
+       * west of Greenwich. The server already decided which local day this is;
+       * re-deriving it in the browser would only be a chance to disagree.
+       */
+      function formatBucketDate(date: string, bucket: string): string {
+        const [year, month, day] = date.split('-');
+        const name = MONTHS[Number(month) - 1] ?? month;
+        if (bucket === 'month') return `${name} ${year}`;
+        return `${name} ${Number(day)}`;
+      }
+
+      const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+
+      function errorBox(message: string): string {
+        return `<p class="rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-200">${escapeHtml(message)}</p>`;
+      }
+
+      function noticeBox(message: string): string {
+        return `<p class="rounded-md border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-800/60 dark:bg-emerald-950/40 dark:text-emerald-200">${escapeHtml(message)}</p>`;
+      }
+
+      function emptyBox(message: string): string {
+        return `<p class="py-10 text-center text-sm text-slate-400">${escapeHtml(message)}</p>`;
+      }
+
+      /** Every string below reaches the DOM through innerHTML, including API text. */
+      function escapeHtml(value: string): string {
+        return value.replace(
+          /[&<>"']/g,
+          (c) =>
+            ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] as string,
+        );
+      }
+
+      function showLogin(): void {
+        $('login').hidden = false;
+        $('content').hidden = true;
+        ($('login-password') as HTMLInputElement).focus();
+      }
+
+      /** A 401 makes the whole page pointless, so it takes the page over. */
+      function handleError(error: unknown, show: (message: string) => void): void {
+        if (error instanceof ApiError && error.status === 401) {
+          showLogin();
+          return;
+        }
+        show(error instanceof Error ? error.message : String(error));
+      }
+
+      // --------------------------------------------------------------- chart
+
+      const CHART = { width: 880, height: 300, top: 16, right: 12, bottom: 42, left: 60 };
+
+      function renderChart(stats: Stats, bucket: string): void {
+        const chart = $('chart');
+        const buckets = stats.buckets;
+
+        if (buckets.length === 0) {
+          chart.innerHTML = emptyBox('No data for this series yet. Record one below.');
+          return;
+        }
+
+        // A text series aggregated with 'last' returns strings. Drawing bars for
+        // those would mean inventing an order they do not have.
+        if (!buckets.every((b) => typeof b.value === 'number')) {
+          chart.innerHTML = renderValueList(buckets, bucket);
+          return;
+        }
+
+        const values = buckets.map((b) => b.value as number);
+        // The domain always includes zero, so bars are read against a baseline
+        // rather than against the smallest value that happens to be present.
+        const max = Math.max(0, ...values);
+        const min = Math.min(0, ...values);
+        const span = max - min || 1;
+
+        const { width, height, top, right, bottom, left } = CHART;
+        const plotW = width - left - right;
+        const plotH = height - top - bottom;
+        const y = (value: number): number => top + plotH - ((value - min) / span) * plotH;
+        const zeroY = y(0);
+
+        const step = plotW / buckets.length;
+        const barW = Math.max(1, Math.min(48, step - Math.max(1, step * 0.25)));
+
+        // At 90 daily buckets there is no room for 90 labels under the axis.
+        const every = Math.ceil(buckets.length / 12);
+
+        const gridlines = [0, 0.25, 0.5, 0.75, 1]
+          .map((t) => {
+            const value = min + span * t;
+            const gy = y(value);
+            return `<line x1="${left}" y1="${gy}" x2="${width - right}" y2="${gy}" class="stroke-slate-200 dark:stroke-slate-800" stroke-width="1" />
+              <text x="${left - 8}" y="${gy + 4}" text-anchor="end" class="fill-slate-400 text-[11px]">${escapeHtml(numberFormat.format(value))}</text>`;
+          })
+          .join('');
+
+        const bars = buckets
+          .map((b, i) => {
+            const value = b.value as number;
+            const x = left + i * step + (step - barW) / 2;
+            const barY = value >= 0 ? y(value) : zeroY;
+            // A minimum of one pixel keeps a very small value visible, but a
+            // real zero draws nothing: a bucket that aggregated to zero should
+            // not look like a bucket that nearly missed.
+            const barH = value === 0 ? 0 : Math.max(1, Math.abs(y(value) - zeroY));
+            const label =
+              i % every === 0
+                ? `<text x="${x + barW / 2}" y="${height - bottom + 18}" text-anchor="middle" class="fill-slate-400 text-[11px]">${escapeHtml(formatBucketDate(b.date, bucket))}</text>`
+                : '';
+
+            return `<g>
+                <rect x="${x}" y="${barY}" width="${barW}" height="${barH}" rx="2"
+                      class="fill-slate-800 transition-opacity hover:opacity-70 dark:fill-slate-300">
+                  <title>${escapeHtml(`${b.date}: ${numberFormat.format(value)}${stats.unit ? ` ${stats.unit}` : ''} (${b.count} observation${b.count === 1 ? '' : 's'})`)}</title>
+                </rect>
+                ${label}
+              </g>`;
+          })
+          .join('');
+
+        chart.innerHTML = `<svg viewBox="0 0 ${width} ${height}" class="w-full" role="img"
+             aria-label="${escapeHtml(`${stats.aggregation} of ${stats.series} by ${bucket}`)}">
+          ${gridlines}
+          <line x1="${left}" y1="${zeroY}" x2="${width - right}" y2="${zeroY}" class="stroke-slate-300 dark:stroke-slate-700" stroke-width="1" />
+          ${bars}
+        </svg>`;
+      }
+
+      function renderValueList(buckets: StatsBucket[], bucket: string): string {
+        const rows = buckets
+          .map(
+            (b) => `<tr class="border-t border-slate-100 dark:border-slate-800">
+              <td class="py-2 pr-4 text-slate-500">${escapeHtml(formatBucketDate(b.date, bucket))}</td>
+              <td class="py-2 pr-4">${escapeHtml(b.value === null ? '—' : String(b.value))}</td>
+              <td class="py-2 text-right text-slate-400">${b.count}</td>
+            </tr>`,
+          )
+          .join('');
+
+        return `<p class="mb-3 text-xs text-slate-400">Text values: listed rather than plotted.</p>
+          <table class="w-full text-sm"><tbody>${rows}</tbody></table>`;
+      }
+
+      // ---------------------------------------------------------------- app
+
+      let allSeries: Series[] = [];
+
+      function selectedSeries(): Series | undefined {
+        const slug = ($('series-select') as HTMLSelectElement).value;
+        return allSeries.find((s) => s.slug === slug);
+      }
+
+      function renderSeriesTable(): void {
+        $('series-table').hidden = allSeries.length === 0;
+        $('series-empty').hidden = allSeries.length > 0;
+
+        $('series-rows').innerHTML = allSeries
+          .map(
+            (s) => `<tr class="${s.archived_at ? 'opacity-50' : ''}">
+              <td class="px-4 py-2.5 font-mono text-xs">${escapeHtml(s.slug)}</td>
+              <td class="px-4 py-2.5">${escapeHtml(s.name)}${s.archived_at ? ' <span class="text-xs text-slate-400">(archived)</span>' : ''}</td>
+              <td class="px-4 py-2.5 text-slate-500">${escapeHtml(s.value_type)}</td>
+              <td class="px-4 py-2.5 text-slate-500">${s.unit ? escapeHtml(s.unit) : '<span class="text-slate-300 dark:text-slate-600">—</span>'}</td>
+              <td class="px-4 py-2.5 text-slate-500">${escapeHtml(s.aggregation)}</td>
+            </tr>`,
+          )
+          .join('');
+      }
+
+      /** The value control mirrors the series' value_type, so the API never sees the wrong shape. */
+      function renderValueInput(series: Series | undefined): void {
+        const slot = $('entry-value-slot');
+        const base =
+          'w-full rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:focus:ring-slate-700';
+
+        if (!series) {
+          slot.innerHTML = `<input id="entry-value" disabled class="${base}" />`;
+          return;
+        }
+
+        if (series.value_type === 'bool') {
+          slot.innerHTML = `<select id="entry-value" class="${base}">
+            <option value="true">Yes</option>
+            <option value="false">No</option>
+          </select>`;
+        } else if (series.value_type === 'text') {
+          slot.innerHTML = `<input id="entry-value" type="text" required maxlength="500" class="${base}" />`;
+        } else {
+          const unit = series.unit ? ` (${series.unit})` : '';
+          slot.innerHTML = `<input id="entry-value" type="number" step="any" required
+            placeholder="Number${escapeHtml(unit)}" class="${base}" />`;
+        }
+      }
+
+      /** Turns the control's string back into the JSON type the series expects. */
+      function readValue(series: Series): number | boolean | string {
+        const raw = ($('entry-value') as HTMLInputElement | HTMLSelectElement).value;
+        if (series.value_type === 'bool') return raw === 'true';
+        if (series.value_type === 'text') return raw;
+        return Number(raw);
+      }
+
+      async function loadStats(): Promise<void> {
+        const series = selectedSeries();
+        const bucket = ($('bucket-select') as HTMLSelectElement).value;
+        const caption = $('chart-caption');
+        const error = $('chart-error');
+        error.hidden = true;
+
+        if (!series) {
+          caption.textContent = '';
+          $('chart').innerHTML = emptyBox('Nothing to plot yet.');
+          return;
+        }
+
+        try {
+          const stats = await api<Stats>(
+            `/api/stats?series=${encodeURIComponent(series.slug)}&bucket=${encodeURIComponent(bucket)}`,
+          );
+          caption.textContent =
+            `${stats.aggregation} of ${series.name}` +
+            (stats.unit ? ` in ${stats.unit}` : '') +
+            `, by ${bucket}`;
+          renderChart(stats, bucket);
+        } catch (e) {
+          caption.textContent = '';
+          $('chart').innerHTML = '';
+          handleError(e, (message) => {
+            error.hidden = false;
+            error.innerHTML = errorBox(message);
+          });
+        }
+      }
+
+      function onSeriesChange(): void {
+        const series = selectedSeries();
+        ($('entry-series') as HTMLInputElement).value = series?.slug ?? '';
+        renderValueInput(series);
+        ($('entry-submit') as HTMLButtonElement).disabled = series === undefined;
+        $('entry-message').hidden = true;
+        void loadStats();
+      }
+
+      async function loadSeries(): Promise<void> {
+        try {
+          const body = await api<{ series: Series[] }>('/api/series');
+          allSeries = body.series;
+        } catch (e) {
+          handleError(e, (message) => {
+            $('series-table').hidden = true;
+            $('series-empty').hidden = false;
+            $('series-empty').innerHTML = errorBox(message);
+          });
+          return;
+        }
+
+        renderSeriesTable();
+
+        const select = $('series-select') as HTMLSelectElement;
+        select.innerHTML = allSeries
+          .filter((s) => s.archived_at === null)
+          .map((s) => `<option value="${escapeHtml(s.slug)}">${escapeHtml(s.name)}</option>`)
+          .join('');
+        select.disabled = select.options.length === 0;
+
+        onSeriesChange();
+      }
+
+      async function onLogin(event: SubmitEvent): Promise<void> {
+        event.preventDefault();
+
+        const password = $('login-password') as HTMLInputElement;
+        const error = $('login-error');
+        const submit = $('login-submit') as HTMLButtonElement;
+
+        error.hidden = true;
+        submit.disabled = true;
+
+        try {
+          await api('/api/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ password: password.value }),
+          });
+
+          // The cookie is the whole session. Nothing is kept on this side, so
+          // there is no state to clear beyond the field itself.
+          password.value = '';
+          $('login-error').hidden = true;
+          $('login').hidden = true;
+          $('content').hidden = false;
+          await loadSeries();
+        } catch (e) {
+          // Deliberately not handleError: a 401 here means the password was
+          // wrong, not that the page needs a session, and routing it through
+          // the takeover would just redraw the form the user is already in.
+          // 429 lands here too, which is the backoff talking.
+          error.hidden = false;
+          error.innerHTML = errorBox(e instanceof Error ? e.message : String(e));
+          password.select();
+        } finally {
+          submit.disabled = false;
+        }
+      }
+
+      async function onSubmit(event: SubmitEvent): Promise<void> {
+        event.preventDefault();
+
+        const series = selectedSeries();
+        if (!series) return;
+
+        const message = $('entry-message');
+        const submit = $('entry-submit') as HTMLButtonElement;
+        const when = ($('entry-when') as HTMLInputElement).value;
+
+        message.hidden = true;
+        submit.disabled = true;
+
+        try {
+          // datetime-local has no zone, so the browser reads it as local time.
+          // Converting here keeps the contract's 'occurred_at is an instant'.
+          const result = await api<{ inserted: number; updated: number }>('/api/observations', {
+            method: 'POST',
+            body: JSON.stringify({
+              observations: [
+                {
+                  series: series.slug,
+                  occurred_at: new Date(when).toISOString(),
+                  value: readValue(series),
+                },
+              ],
+            }),
+          });
+
+          message.hidden = false;
+          message.innerHTML = noticeBox(
+            result.inserted > 0 ? 'Recorded.' : 'Updated the existing observation.',
+          );
+          await loadStats();
+        } catch (e) {
+          handleError(e, (text) => {
+            message.hidden = false;
+            message.innerHTML = errorBox(text);
+          });
+        } finally {
+          submit.disabled = false;
+        }
+      }
+
+      // --------------------------------------------------------------- boot
+
+      const now = new Date();
+      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+      ($('entry-when') as HTMLInputElement).value = now.toISOString().slice(0, 16);
+
+      $('login-form').addEventListener('submit', (e) => void onLogin(e as SubmitEvent));
+      $('series-select').addEventListener('change', onSeriesChange);
+      $('bucket-select').addEventListener('change', () => void loadStats());
+      $('entry-form').addEventListener('submit', (e) => void onSubmit(e as SubmitEvent));
+
+      void loadSeries();
+    </script>
+  </body>
+</html>
